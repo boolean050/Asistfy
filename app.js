@@ -22,6 +22,11 @@ function App() {
   const [cambiosDirectorio, setCambiosDirectorio] = useState([]);
   const [eventoSeleccionado, setEventoSeleccionado] = useState(null);
 
+  const [mostrarPopup, setMostrarPopup] = useState(false);
+  
+  const [preRegistradosEvento, setPreRegistradosEvento] = useState([]);
+  const [yaRegistrado, setYaRegistrado] = useState(false);
+
   const [formEvento, setFormEvento] = useState({ titulo: '', descripcion: '', fecha: '', hora: '', portada: 'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80' });
   const [editandoEventoId, setEditandoEventoId] = useState(null);
 
@@ -31,13 +36,12 @@ function App() {
   }, [pantallaActual, esAdmin]);
 
   useEffect(() => {
-    if (esAdmin) {
-      if (pantallaActual === 'admin_maestros' || pantallaActual === 'admin_asistencia_evento') {
-        obtenerMaestros();
-      }
-      if (pantallaActual === 'admin_eventos') {
-        obtenerEventos();
-      }
+    if (pantallaActual === 'admin_eventos' || pantallaActual === 'eventos') {
+      obtenerEventos();
+    }
+    
+    if (esAdmin && (pantallaActual === 'admin_maestros' || pantallaActual === 'admin_asistencia_evento')) {
+      obtenerMaestros();
     }
   }, [pantallaActual, esAdmin]);
 
@@ -76,15 +80,21 @@ function App() {
 
     const inputLimpio = numEmpleado.trim();
 
-    if (inputLimpio === '$#024*816*$') {
-      setNombreMaestro('Dra. Indira Escamilla');
-      setEsAdmin(true);
-      setPantallaActual('registro');
-      setCargando(false);
-      return;
-    }
-
     try {
+      const configRef = db.collection('config').doc('admin_auth');
+      const configSnap = await configRef.get();
+
+      if (configSnap.exists) {
+        const adminData = configSnap.data();
+        if (inputLimpio === adminData.claveAdmin) {
+          setNombreMaestro(adminData.nombreAdmin || 'Administrador');
+          setEsAdmin(true);
+          setPantallaActual('registro');
+          setCargando(false);
+          return;
+        }
+      }
+
       const docRef = db.collection('directorio_fime').doc(inputLimpio);
       const docSnap = await docRef.get(); 
 
@@ -94,7 +104,7 @@ function App() {
         setEsAdmin(false); 
         setPantallaActual('registro');
       } else {
-        setError('Número de empleado no reconocido en la facultad.');
+        setError('Número de empleado o clave de acceso no reconocido.');
       }
     } catch (err) {
       console.error("Error al consultar:", err);
@@ -113,6 +123,7 @@ function App() {
     setEsAdmin(false);
     setMenuAbierto(false);
     setModoEdicion(false);
+    setMostrarPopup(false);
   };
 
   const navegarA = (pantalla) => {
@@ -120,6 +131,68 @@ function App() {
     setMenuAbierto(false);
     setModoEdicion(false); 
     setEditandoEventoId(null);
+    setMostrarPopup(false);
+  };
+
+  const abrirAsistenciasAdmin = async (evento) => {
+    setEventoSeleccionado(evento);
+    setCargando(true);
+    try {
+      const snapshot = await db.collection('pre_asistencias').where('eventoId', '==', evento.id).get();
+      const listaPreRegistrados = snapshot.docs.map(doc => doc.data().numEmpleado);
+      setPreRegistradosEvento(listaPreRegistrados);
+      navegarA('admin_asistencia_evento');
+    } catch (err) {
+      console.error("Error al cargar pre-asistencias:", err);
+      alert("Hubo un error al cargar los registros.");
+    }
+    setCargando(false);
+  };
+
+  const abrirDetalleEventoUsuario = async (evento) => {
+    setEventoSeleccionado(evento);
+    setCargando(true);
+    try {
+      const docIdUnico = `${evento.id}_${numEmpleado}`;
+      const docSnap = await db.collection('pre_asistencias').doc(docIdUnico).get();
+      
+      setYaRegistrado(docSnap.exists);
+      navegarA('detalle_evento');
+    } catch (err) {
+      console.error("Error al verificar registro:", err);
+      navegarA('detalle_evento');
+    }
+    setCargando(false);
+  };
+
+  const registrarPreAsistencia = async () => {
+    if (!eventoSeleccionado) return;
+    setCargando(true);
+    
+    try {
+      const docIdUnico = `${eventoSeleccionado.id}_${numEmpleado}`;
+      const docRef = db.collection('pre_asistencias').doc(docIdUnico);
+      const docSnap = await docRef.get();
+
+      if (docSnap.exists) {
+        alert("⚠️ Ya te encuentras registrado para este evento.");
+        setYaRegistrado(true);
+      } else {
+        await docRef.set({
+          eventoId: eventoSeleccionado.id,
+          numEmpleado: numEmpleado,
+          nombreMaestro: nombreMaestro,
+          fechaRegistro: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        
+        setYaRegistrado(true);
+        setMostrarPopup(true); 
+      }
+    } catch (err) {
+      console.error(err);
+      alert("❌ Error de conexión al intentar registrar tu asistencia.");
+    }
+    setCargando(false);
   };
 
   const iniciarEdicion = () => {
@@ -179,6 +252,9 @@ function App() {
     setCargando(false);
   };
 
+  // =========================================================
+  // FUNCIÓN ACTUALIZADA: REINICIA LAS PRE-ASISTENCIAS AL EDITAR
+  // =========================================================
   const guardarEvento = async (e) => {
     e.preventDefault();
     if (!formEvento.titulo || !formEvento.fecha) {
@@ -186,9 +262,16 @@ function App() {
       return;
     }
 
+    // Si estamos editando, lanzamos la advertencia antes de procesar nada
+    if (editandoEventoId) {
+      const confirmacion = window.confirm("⚠️ Al modificar este evento, se borrarán las pre-asistencias actuales para obligar a los docentes a confirmar con los nuevos datos. ¿Deseas continuar?");
+      if (!confirmacion) return; // Si dice cancelar, detenemos la función
+    }
+
     setCargando(true);
     try {
       if (editandoEventoId) {
+        // 1. Actualizamos el evento
         await db.collection('eventos_fime').doc(editandoEventoId).update({
           titulo: formEvento.titulo,
           descripcion: formEvento.descripcion,
@@ -196,8 +279,20 @@ function App() {
           hora: formEvento.hora,
           portada: formEvento.portada
         });
-        alert("✅ ¡Evento actualizado con éxito!");
+
+        // 2. Borramos las pre-asistencias viejas
+        const snapshotPre = await db.collection('pre_asistencias').where('eventoId', '==', editandoEventoId).get();
+        if (!snapshotPre.empty) {
+          const batch = db.batch();
+          snapshotPre.docs.forEach((doc) => {
+            batch.delete(doc.ref);
+          });
+          await batch.commit(); // Ejecutamos el borrado masivo
+        }
+
+        alert("✅ ¡Evento actualizado y pre-asistencias reiniciadas con éxito!");
       } else {
+        // Creación normal de evento
         await db.collection('eventos_fime').add({
           titulo: formEvento.titulo,
           descripcion: formEvento.descripcion,
@@ -218,10 +313,8 @@ function App() {
     setCargando(false);
   };
 
-  // NUEVA FUNCIÓN PARA ELIMINAR EVENTO CON LA ADVERTENCIA SOLICITADA
   const eliminarEvento = async () => {
     if (!editandoEventoId) return;
-
     const confirmacion = window.confirm("⚠️ Avisar a las personas registradas que el evento se eliminará permanentemente ya sea para algún cambio o su eliminación total");
     
     if (confirmacion) {
@@ -314,7 +407,7 @@ function App() {
 
             <button
               onClick={() => navegarA(esAdmin ? 'admin_eventos' : 'eventos')}
-              className={`w-full ${themeBg} text-white py-3 px-4 rounded-lg font-bold ${themeHover} transition-all`}
+              className={`w-full ${themeBg} text-white py-3 px-4 rounded-lg font-bold hover:${themeHover} transition-all`}
             >
               Entrar al Sistema
             </button>
@@ -364,7 +457,7 @@ function App() {
             </>
           ) : (
             <>
-              <button onClick={() => navegarA('eventos')} className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === 'eventos' ? `${themeBg} text-white` : 'hover:bg-white/10 text-white/80'}`}>
+              <button onClick={() => navegarA('eventos')} className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === 'eventos' || pantallaActual === 'detalle_evento' ? `${themeBg} text-white` : 'hover:bg-white/10 text-white/80'}`}>
                 <span>📅 Inicio / Eventos</span>
               </button>
               <button onClick={() => navegarA('mis_eventos')} className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === 'mis_eventos' ? `${themeBg} text-white` : 'hover:bg-white/10 text-white/80'}`}>
@@ -399,7 +492,7 @@ function App() {
             <div>
               <div className="flex justify-between items-center mb-6">
                 <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Eventos Disponibles</h2>
-                <button onClick={() => { setEditandoEventoId(null); setFormEvento({ titulo: '', descripcion: '', fecha: '', hora: '', portada: 'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80' }); navegarA('registrar_evento'); }} className={`${themeBg} text-white px-4 py-2 rounded-lg text-sm font-bold ${themeHover} shadow-sm`}>
+                <button onClick={() => { setEditandoEventoId(null); setFormEvento({ titulo: '', descripcion: '', fecha: '', hora: '', portada: 'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80' }); navegarA('registrar_evento'); }} className={`${themeBg} text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:opacity-90`}>
                   ➕ Nuevo Evento
                 </button>
               </div>
@@ -419,10 +512,10 @@ function App() {
                       
                       <div className="mt-5 pt-3 border-t border-gray-100 flex justify-between items-center">
                         <button 
-                          onClick={() => { setEventoSeleccionado(evento); navegarA('admin_asistencia_evento'); }}
+                          onClick={() => abrirAsistenciasAdmin(evento)}
                           className="text-sky-600 text-sm font-bold hover:underline"
                         >
-                          Ver Asistencias &rarr;
+                          {cargando && eventoSeleccionado?.id === evento.id ? 'Cargando...' : 'Ver Asistencias →'}
                         </button>
                         <button 
                           onClick={() => prepararEdicionEvento(evento)}
@@ -466,6 +559,7 @@ function App() {
                       <tr className="bg-gray-50 border-b border-gray-200">
                         <th className="p-4 text-sm font-bold text-gray-600">NO. EMPLEADO</th>
                         <th className="p-4 text-sm font-bold text-gray-600">NOMBRE DEL DOCENTE</th>
+                        <th className="p-4 text-sm font-bold text-gray-600 text-center">PRE-ASISTENCIA</th>
                         <th className="p-4 text-sm font-bold text-gray-600 text-center">FIRMA (ASISTENCIA)</th>
                       </tr>
                     </thead>
@@ -474,6 +568,9 @@ function App() {
                         <tr key={maestro.id} className="hover:bg-gray-50 transition-colors">
                           <td className="p-4 text-sm font-semibold text-gray-700">{maestro.id}</td>
                           <td className="p-4 text-sm text-gray-800 font-medium">{maestro.nombreCompleto}</td>
+                          <td className="p-4 text-center text-xl">
+                            {preRegistradosEvento.includes(maestro.id) ? '✅' : '❗'}
+                          </td>
                           <td className="p-4 text-center text-xl">❗</td>
                         </tr>
                       ))}
@@ -499,7 +596,7 @@ function App() {
                     </button>
                   </div>
                 ) : (
-                  <button onClick={iniciarEdicion} className={`${themeBg} text-white px-4 py-2 rounded-lg text-sm font-bold ${themeHover} shadow-sm`}>
+                  <button onClick={iniciarEdicion} className={`${themeBg} text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:opacity-90`}>
                     ✏️ Editar Tabla
                   </button>
                 )}
@@ -544,11 +641,9 @@ function App() {
                           </td>
                         </tr>
                       ))}
-
                     </tbody>
                   </table>
                 </div>
-
                 {modoEdicion && (
                   <div className="p-4 border-t border-gray-100 bg-gray-50 text-center">
                     <button onClick={agregarFila} className="text-sky-600 font-bold text-sm bg-sky-100 hover:bg-sky-200 px-4 py-2 rounded-lg transition-colors">
@@ -560,9 +655,6 @@ function App() {
             </div>
           )}
 
-          {/* ============================================================== */}
-          {/* ADMIN: 4. FORMULARIO CREAR / EDITAR / ELIMINAR EVENTO */}
-          {/* ============================================================== */}
           {pantallaActual === 'registrar_evento' && esAdmin && (
             <div className="max-w-2xl mx-auto w-full">
               <div className="flex justify-between items-center mb-6">
@@ -578,49 +670,22 @@ function App() {
                 <form onSubmit={guardarEvento} className="space-y-5">
                   <div>
                     <label className="block text-sm font-bold text-gray-700 mb-1">Título del Evento</label>
-                    <input 
-                      type="text" 
-                      value={formEvento.titulo}
-                      onChange={(e) => setFormEvento({...formEvento, titulo: e.target.value})}
-                      placeholder="Ej. Junta de Academia"
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                      required 
-                    />
+                    <input type="text" value={formEvento.titulo} onChange={(e) => setFormEvento({...formEvento, titulo: e.target.value})} placeholder="Ej. Junta de Academia" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm" required />
                   </div>
-
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-bold text-gray-700 mb-1">Fecha</label>
-                      <input 
-                        type="date" 
-                        value={formEvento.fecha}
-                        onChange={(e) => setFormEvento({...formEvento, fecha: e.target.value})}
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                        required 
-                      />
+                      <input type="date" value={formEvento.fecha} onChange={(e) => setFormEvento({...formEvento, fecha: e.target.value})} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm" required />
                     </div>
                     <div>
                       <label className="block text-sm font-bold text-gray-700 mb-1">Hora</label>
-                      <input 
-                        type="time" 
-                        value={formEvento.hora}
-                        onChange={(e) => setFormEvento({...formEvento, hora: e.target.value})}
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm" 
-                      />
+                      <input type="time" value={formEvento.hora} onChange={(e) => setFormEvento({...formEvento, hora: e.target.value})} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm" />
                     </div>
                   </div>
-
                   <div>
                     <label className="block text-sm font-bold text-gray-700 mb-1">Descripción corta</label>
-                    <textarea 
-                      rows="3"
-                      value={formEvento.descripcion}
-                      onChange={(e) => setFormEvento({...formEvento, descripcion: e.target.value})}
-                      placeholder="Detalles breves del evento..."
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                    ></textarea>
+                    <textarea rows="3" value={formEvento.descripcion} onChange={(e) => setFormEvento({...formEvento, descripcion: e.target.value})} placeholder="Detalles breves del evento..." className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"></textarea>
                   </div>
-
                   <div>
                     <label className="block text-sm font-bold text-gray-700 mb-2">Selecciona una Portada Predefinida (o pega un link)</label>
                     <div className="grid grid-cols-2 gap-3 mb-3">
@@ -630,41 +695,20 @@ function App() {
                         { label: 'Tecnología', url: 'https://images.unsplash.com/photo-1531482615713-2afd69097998?auto=format&fit=crop&w=600&q=80' },
                         { label: 'Reunión', url: 'https://images.unsplash.com/photo-1522071820081-009f0129c71c?auto=format&fit=crop&w=600&q=80' }
                       ].map((item, idx) => (
-                        <div 
-                          key={idx}
-                          onClick={() => setFormEvento({...formEvento, portada: item.url})}
-                          className={`cursor-pointer border-2 rounded-lg p-2 text-center text-xs font-bold transition-all ${formEvento.portada === item.url ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-gray-200 text-gray-600'}`}
-                        >
+                        <div key={idx} onClick={() => setFormEvento({...formEvento, portada: item.url})} className={`cursor-pointer border-2 rounded-lg p-2 text-center text-xs font-bold transition-all ${formEvento.portada === item.url ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-gray-200 text-gray-600'}`}>
                           {item.label}
                         </div>
                       ))}
                     </div>
-                    <input 
-                      type="text" 
-                      value={formEvento.portada}
-                      onChange={(e) => setFormEvento({...formEvento, portada: e.target.value})}
-                      placeholder="O pega el link de una imagen..."
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-xs text-gray-500"
-                    />
+                    <input type="text" value={formEvento.portada} onChange={(e) => setFormEvento({...formEvento, portada: e.target.value})} placeholder="O pega el link de una imagen..." className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-xs text-gray-500"/>
                   </div>
-
-                  {/* BOTONES DE ACCIÓN (GUARDAR Y ELIMINAR SI ESTÁ EDITANDO) */}
                   <div className="flex gap-3 pt-2">
                     {editandoEventoId && (
-                      <button 
-                        type="button" 
-                        onClick={eliminarEvento}
-                        disabled={cargando}
-                        className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 py-3 px-4 rounded-lg font-bold transition-all text-sm flex items-center justify-center"
-                      >
+                      <button type="button" onClick={eliminarEvento} disabled={cargando} className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 py-3 px-4 rounded-lg font-bold transition-all text-sm flex items-center justify-center">
                         🗑️ Eliminar
                       </button>
                     )}
-                    <button 
-                      type="submit" 
-                      disabled={cargando}
-                      className={`flex-1 ${themeBg} text-white py-3 px-4 rounded-lg font-bold ${themeHover} transition-all text-sm`}
-                    >
+                    <button type="submit" disabled={cargando} className={`flex-1 ${themeBg} text-white py-3 px-4 rounded-lg font-bold hover:opacity-90 transition-all text-sm`}>
                       {cargando ? 'Guardando en la nube...' : (editandoEventoId ? '💾 Actualizar Evento' : '🚀 Publicar Evento')}
                     </button>
                   </div>
@@ -673,11 +717,124 @@ function App() {
             </div>
           )}
 
+          {/* ============================================================== */}
+          {/* USUARIO NORMAL: LISTA DE EVENTOS (MODO LECTURA) */}
+          {/* ============================================================== */}
           {!esAdmin && pantallaActual === 'eventos' && (
-             <div><h2 className="text-2xl font-bold">Vista de Eventos (Maestro Normal)</h2></div>
+            <div>
+              <div className="mb-6">
+                <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Próximos Eventos</h2>
+                <p className="text-gray-500 text-sm mt-1">Selecciona un evento para registrar tu pre-asistencia o ver los detalles.</p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {listaEventos.map((evento) => (
+                  <div key={evento.id} className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100 transition-transform hover:-translate-y-1">
+                    <div className="h-40 bg-gray-200 relative overflow-hidden">
+                      <img src={evento.portada} alt={evento.titulo} className="w-full h-full object-cover" />
+                    </div>
+                    <div className="p-5 flex-1 flex flex-col justify-between">
+                      <div>
+                        <h3 className="text-lg font-bold text-gray-800">{evento.titulo}</h3>
+                        <p className="text-gray-500 text-xs mt-1">📅 {evento.fecha} • {evento.hora || 'Por definir'}</p>
+                        <p className="text-gray-600 text-sm mt-2 line-clamp-2">{evento.descripcion}</p>
+                      </div>
+                      
+                      <div className="mt-5 pt-3 border-t border-gray-100">
+                        <button 
+                          onClick={() => abrirDetalleEventoUsuario(evento)}
+                          className="w-full bg-fime-main text-white py-2.5 rounded-lg font-bold hover:bg-fime-dark transition-all text-sm flex justify-center items-center gap-2"
+                        >
+                          {cargando && eventoSeleccionado?.id === evento.id ? 'Cargando...' : '👁️ Ver Detalles'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+
+                {listaEventos.length === 0 && (
+                  <div className="col-span-full bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center text-gray-500">
+                    <p className="font-medium text-lg">No hay eventos próximos en este momento.</p>
+                  </div>
+                )}
+              </div>
+            </div>
           )}
+
+          {/* ============================================================== */}
+          {/* USUARIO NORMAL: DETALLE DEL EVENTO CON BOTONES */}
+          {/* ============================================================== */}
+          {!esAdmin && pantallaActual === 'detalle_evento' && eventoSeleccionado && (
+            <div className="max-w-3xl mx-auto w-full relative">
+              <button onClick={() => navegarA('eventos')} className="text-gray-500 hover:text-gray-800 text-sm font-bold mb-4 flex items-center transition-colors">
+                &larr; Regresar a Eventos
+              </button>
+              
+              <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-100">
+                <div className="h-64 bg-gray-200 relative overflow-hidden">
+                  <img src={eventoSeleccionado.portada} alt={eventoSeleccionado.titulo} className="w-full h-full object-cover" />
+                </div>
+                <div className="p-6 md:p-8">
+                  <h2 className="text-2xl md:text-3xl font-bold text-gray-800 mb-2">{eventoSeleccionado.titulo}</h2>
+                  <div className="flex items-center space-x-4 text-sm text-gray-500 mb-6 font-medium">
+                    <span className="flex items-center bg-gray-50 px-3 py-1 rounded-full border border-gray-100">📅 {eventoSeleccionado.fecha}</span>
+                    <span className="flex items-center bg-gray-50 px-3 py-1 rounded-full border border-gray-100">⏰ {eventoSeleccionado.hora || 'Por definir'}</span>
+                  </div>
+                  
+                  <div className="text-gray-600 mb-8 whitespace-pre-wrap leading-relaxed">
+                    {eventoSeleccionado.descripcion || 'Sin descripción detallada.'}
+                  </div>
+
+                  <div className="flex flex-col sm:flex-row gap-4 border-t border-gray-100 pt-6">
+                    <button 
+                      onClick={() => navegarA('eventos')}
+                      className="flex-1 bg-gray-100 text-gray-700 py-3 px-4 rounded-lg font-bold hover:bg-gray-200 transition-all flex justify-center items-center"
+                    >
+                      Regresar
+                    </button>
+                    
+                    <button 
+                      onClick={registrarPreAsistencia}
+                      disabled={cargando || yaRegistrado}
+                      className={`flex-1 text-white py-3 px-4 rounded-lg font-bold transition-all flex justify-center items-center gap-2 ${
+                        yaRegistrado 
+                          ? 'bg-gray-400 cursor-not-allowed' 
+                          : 'bg-green-600 hover:bg-green-700 shadow-md hover:shadow-lg'
+                      }`}
+                    >
+                      {cargando ? 'Procesando...' : (yaRegistrado ? '✅ Ya estás registrado' : '✅ Pre-asistencia')}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {mostrarPopup && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+                  <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center transform transition-all animate-bounce-short">
+                    <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner border-4 border-white">
+                      <span className="text-4xl">🎉</span>
+                    </div>
+                    <h3 className="text-2xl font-extrabold text-gray-800 mb-2">¡Pre-asistencia enviada!</h3>
+                    <p className="text-gray-600 mb-6 font-medium leading-relaxed">
+                      Tu registro para <strong className="text-gray-800">{eventoSeleccionado.titulo}</strong> ha sido confirmado exitosamente.
+                    </p>
+                    <button 
+                      onClick={() => setMostrarPopup(false)}
+                      className="w-full bg-green-600 text-white py-3 rounded-xl font-bold hover:bg-green-700 transition-all shadow-md hover:shadow-lg"
+                    >
+                      Entendido
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {!esAdmin && pantallaActual === 'mis_eventos' && (
-             <div><h2 className="text-2xl font-bold">Vista de Mis Registros</h2></div>
+             <div>
+               <h2 className="text-2xl font-bold text-gray-800">Mis Registros</h2>
+               <p className="text-gray-500 mt-2">Aquí verás tu historial de asistencias (Próximamente).</p>
+             </div>
           )}
 
         </div>
