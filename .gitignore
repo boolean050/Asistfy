@@ -1,0 +1,10 @@
+# Dependencias y Entornos
+node_modules/
+.env
+.env/local
+
+#Archvios del sistema operativo y  editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

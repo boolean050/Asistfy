@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sistema de Eventos FIME</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            fime: {
+              dark: '#004a22',
+              main: '#006a31',
+              light: '#e6f0eb',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- ========================================== -->
+  <!-- 1. LIBRERÍAS DE FIREBASE (SIN NPM)         -->
+  <!-- ========================================== -->
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
+  <!-- ========================================== -->
+  <!-- 2. TU CONFIGURACIÓN DE ASISTFY             -->
+  <!-- ========================================== -->
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyBZfwTV7pSxzWyD9ys0t1gZlJyND7aSPxw",
+      authDomain: "asistfy-53a36.firebaseapp.com",
+      projectId: "asistfy-53a36",
+      storageBucket: "asistfy-53a36.firebasestorage.app",
+      messagingSenderId: "986179406973",
+      appId: "1:986179406973:web:4aa1c082a4ceb67848b514",
+      measurementId: "G-9QFS4G4ZMG"
+    };
+
+    // Inicializamos Asistfy
+    const app = firebase.initializeApp(firebaseConfig);
+    // Activamos la base de datos Firestore
+    const db = firebase.firestore();
+  </script>
+</head>
+<body class="bg-gray-50 font-sans">
+  <div id="root"></div>
+
+  <!-- Llamamos a tu archivo externo con la lógica -->
+  <script type="text/babel" src="app.js"></script>
+
+</body>
+</html>
+
+

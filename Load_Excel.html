@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <title>Migrador de Maestros a Firebase</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <script src="https://cdn.sheetjs.com/xlsx-latest/package/dist/xlsx.full.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+
+  <script>
+    const firebaseConfig = {
+      apiKey: "AIzaSyBZfwTV7pSxzWyD9ys0t1gZlJyND7aSPxw",
+      authDomain: "asistfy-53a36.firebaseapp.com",
+      projectId: "asistfy-53a36",
+      storageBucket: "asistfy-53a36.firebasestorage.app",
+      messagingSenderId: "986179406973",
+      appId: "1:986179406973:web:4aa1c082a4ceb67848b514"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
+  </script>
+</head>
+<body class="bg-gray-100 flex items-center justify-center h-screen">
+  <div class="bg-white p-8 rounded-xl shadow-lg w-full max-w-md text-center border-t-8 border-green-600">
+    <h2 class="text-2xl font-bold text-gray-800 mb-4">Cargar Directorio FIME</h2>
+    <p class="text-gray-600 text-sm mb-6">Selecciona el archivo Lista_Maestros.xlsx para migrar los datos a Asistfy.</p>
+    
+    <input type="file" id="inputExcel" accept=".xlsx, .xls" class="mb-4 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-green-50 file:text-green-700 hover:file:bg-green-100" />
+    
+    <button id="btnSubir" class="w-full bg-green-600 text-white py-3 px-4 rounded-lg font-bold hover:bg-green-700 mt-4 transition-all">
+      Subir a Base de Datos
+    </button>
+    
+    <p id="estado" class="mt-4 text-sm font-bold"></p>
+  </div>
+
+  <script>
+    document.getElementById('btnSubir').addEventListener('click', () => {
+      const input = document.getElementById('inputExcel');
+      const estado = document.getElementById('estado');
+      
+      if (!input.files[0]) {
+        estado.textContent = "⚠ Por favor selecciona un archivo primero.";
+        estado.className = "mt-4 text-sm font-bold text-red-600";
+        return;
+      }
+
+      estado.textContent = "⏳ Procesando archivo... No cierres esta ventana.";
+      estado.className = "mt-4 text-sm font-bold text-blue-600";
+      
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, {type: 'array'});
+          
+          const nombrePrimeraHoja = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[nombrePrimeraHoja];
+
+          // AQUÍ ESTÁ LA MAGIA: { range: 1 } hace que empiece a leer desde la segunda fila
+          const maestros = XLSX.utils.sheet_to_json(worksheet, { range: 1 });
+
+          let contador = 0;
+          for (const maestro of maestros) {
+            let keyNumEmpleado = Object.keys(maestro).find(k => k.trim() === 'No.Empleado');
+            let keyNombre = Object.keys(maestro).find(k => k.includes('Nombre del Docente'));
+
+            if(keyNumEmpleado && maestro[keyNumEmpleado]) {
+                const idDoc = String(maestro[keyNumEmpleado]).trim();
+                const nombreCompleto = keyNombre ? String(maestro[keyNombre]).trim() : "";
+                
+                await db.collection('directorio_fime').doc(idDoc).set({
+                  nombreCompleto: nombreCompleto,
+                  registrado: false
+                });
+                contador++;
+            }
+          }
+          
+          estado.textContent = `✅ ¡Éxito! Se subieron ${contador} maestros a la base de datos de Asistfy.`;
+          estado.className = "mt-4 text-sm font-bold text-green-600";
+        } catch (error) {
+          estado.textContent = "❌ Error al subir: " + error.message;
+          estado.className = "mt-4 text-sm font-bold text-red-600";
+        }
+      };
+      reader.readAsArrayBuffer(input.files[0]);
+    });
+  </script>
+</body>
+</html>
