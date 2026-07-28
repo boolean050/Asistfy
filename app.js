@@ -1,6 +1,11 @@
 const { useState, useEffect } = React;
 
 function App() {
+  // === 1. DETECCIÓN DEL LINK DEL QR ===
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlEventoId = urlParams.get('asistencia');
+  const [qrEventoId, setQrEventoId] = useState(urlEventoId);
+
   const [pantallaActual, setPantallaActual] = useState(() => {
     return localStorage.getItem('pantallaFime') || 'validacion';
   });
@@ -24,8 +29,15 @@ function App() {
 
   const [mostrarPopup, setMostrarPopup] = useState(false);
   
+  // ESTADOS DE ASISTENCIAS
   const [preRegistradosEvento, setPreRegistradosEvento] = useState([]);
+  const [asistentesFinalesEvento, setAsistentesFinalesEvento] = useState([]); // Nueva tabla
   const [yaRegistrado, setYaRegistrado] = useState(false);
+
+  // ESTADOS DEL QR Y CONFIRMACIÓN FINAL
+  const [mostrarModalQR, setMostrarModalQR] = useState(false);
+  const [linkQRDinamico, setLinkQRDinamico] = useState('');
+  const [confirmacionExitosa, setConfirmacionExitosa] = useState(false);
 
   const [formEvento, setFormEvento] = useState({ titulo: '', descripcion: '', fecha: '', hora: '', portada: 'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80' });
   const [editandoEventoId, setEditandoEventoId] = useState(null);
@@ -102,7 +114,13 @@ function App() {
         const datos = docSnap.data();
         setNombreMaestro(datos.nombreCompleto);
         setEsAdmin(false); 
-        setPantallaActual('registro');
+        
+        // AQUÍ ESTÁ LA MAGIA: Si hay un QR activo en el link, lo mandamos a la pantalla especial
+        if (qrEventoId) {
+          setPantallaActual('confirmar_asistencia');
+        } else {
+          setPantallaActual('registro');
+        }
       } else {
         setError('Número de empleado o clave de acceso no reconocido.');
       }
@@ -124,6 +142,7 @@ function App() {
     setMenuAbierto(false);
     setModoEdicion(false);
     setMostrarPopup(false);
+    setConfirmacionExitosa(false);
   };
 
   const navegarA = (pantalla) => {
@@ -134,28 +153,88 @@ function App() {
     setMostrarPopup(false);
   };
 
+  // ==========================================
+  // FUNCIONES DE ADMIN
+  // ==========================================
   const abrirAsistenciasAdmin = async (evento) => {
     setEventoSeleccionado(evento);
     setCargando(true);
     try {
-      const snapshot = await db.collection('pre_asistencias').where('eventoId', '==', evento.id).get();
-      const listaPreRegistrados = snapshot.docs.map(doc => doc.data().numEmpleado);
-      setPreRegistradosEvento(listaPreRegistrados);
+      // Cargamos pre-asistencias
+      const snapshotPre = await db.collection('pre_asistencias').where('eventoId', '==', evento.id).get();
+      const listaPre = snapshotPre.docs.map(doc => doc.data().numEmpleado);
+      setPreRegistradosEvento(listaPre);
+
+      // Cargamos asistencias finales (La firma real)
+      const snapshotAsis = await db.collection('asistencias').where('eventoId', '==', evento.id).get();
+      const listaAsis = snapshotAsis.docs.map(doc => doc.data().numEmpleado);
+      setAsistentesFinalesEvento(listaAsis);
+
       navegarA('admin_asistencia_evento');
     } catch (err) {
-      console.error("Error al cargar pre-asistencias:", err);
+      console.error("Error al cargar registros:", err);
       alert("Hubo un error al cargar los registros.");
     }
     setCargando(false);
   };
 
+  const abrirModalQR = (evento) => {
+    // Genera el link exacto donde esté alojada tu página y le pega el ID del evento
+    const baseUrl = window.location.origin + window.location.pathname;
+    const qrLink = `${baseUrl}?asistencia=${evento.id}`;
+    
+    setLinkQRDinamico(qrLink);
+    setEventoSeleccionado(evento);
+    setMostrarModalQR(true);
+  };
+
+  // ==========================================
+  // FLUJO DE CONFIRMACIÓN FINAL (QR SCANEADO)
+  // ==========================================
+  const registrarAsistenciaFinal = async () => {
+    setCargando(true);
+    try {
+      const docIdUnico = `${qrEventoId}_${numEmpleado}`;
+      const docRef = db.collection('asistencias').doc(docIdUnico);
+      const docSnap = await docRef.get();
+
+      if (docSnap.exists) {
+        alert("Ya habías confirmado tu asistencia a este evento anteriormente.");
+      } else {
+        // Registramos la firma en la nube
+        await docRef.set({
+          eventoId: qrEventoId,
+          numEmpleado: numEmpleado,
+          nombreMaestro: nombreMaestro,
+          fechaFirma: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        
+        // Activamos la vista de éxito
+        setConfirmacionExitosa(true);
+
+        // A los 3.5 segundos, limpiamos el link y lo sacamos
+        setTimeout(() => {
+          window.history.replaceState({}, document.title, window.location.pathname);
+          setQrEventoId(null);
+          cerrarSesion();
+        }, 3500);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error de conexión al firmar.");
+    }
+    setCargando(false);
+  };
+
+  // ==========================================
+  // FUNCIONES DE USUARIO Y EVENTOS
+  // ==========================================
   const abrirDetalleEventoUsuario = async (evento) => {
     setEventoSeleccionado(evento);
     setCargando(true);
     try {
       const docIdUnico = `${evento.id}_${numEmpleado}`;
       const docSnap = await db.collection('pre_asistencias').doc(docIdUnico).get();
-      
       setYaRegistrado(docSnap.exists);
       navegarA('detalle_evento');
     } catch (err) {
@@ -195,128 +274,65 @@ function App() {
     setCargando(false);
   };
 
-  const iniciarEdicion = () => {
-    setCambiosDirectorio(JSON.parse(JSON.stringify(listaDirectorio)));
-    setModoEdicion(true);
-  };
-
-  const cancelarEdicion = () => {
-    setModoEdicion(false);
-    setCambiosDirectorio([]);
-  };
-
-  const handleCambioInput = (index, campo, valor) => {
-    const nuevaLista = [...cambiosDirectorio];
-    nuevaLista[index][campo] = valor;
-    setCambiosDirectorio(nuevaLista);
-  };
-
-  const agregarFila = () => {
-    setCambiosDirectorio([...cambiosDirectorio, { id: '', nombreCompleto: '', trayectoria: '', registrado: false }]);
-  };
-
-  const eliminarFila = (index) => {
-    const nuevaLista = [...cambiosDirectorio];
-    nuevaLista.splice(index, 1);
-    setCambiosDirectorio(nuevaLista);
-  };
+  // (FUNCIONES DE EDICIÓN Y GUARDADO DE TABLA/EVENTOS SE MANTIENEN INTACTAS)
+  const iniciarEdicion = () => { setCambiosDirectorio(JSON.parse(JSON.stringify(listaDirectorio))); setModoEdicion(true); };
+  const cancelarEdicion = () => { setModoEdicion(false); setCambiosDirectorio([]); };
+  const handleCambioInput = (index, campo, valor) => { const nuevaLista = [...cambiosDirectorio]; nuevaLista[index][campo] = valor; setCambiosDirectorio(nuevaLista); };
+  const agregarFila = () => { setCambiosDirectorio([...cambiosDirectorio, { id: '', nombreCompleto: '', trayectoria: '', registrado: false }]); };
+  const eliminarFila = (index) => { const nuevaLista = [...cambiosDirectorio]; nuevaLista.splice(index, 1); setCambiosDirectorio(nuevaLista); };
 
   const guardarCambios = async () => {
     setCargando(true);
     try {
       const batch = db.batch();
-      
       const eliminados = listaDirectorio.filter(orig => !cambiosDirectorio.some(c => c.id === orig.id));
-      eliminados.forEach(emp => {
-         batch.delete(db.collection('directorio_fime').doc(emp.id));
-      });
-
+      eliminados.forEach(emp => { batch.delete(db.collection('directorio_fime').doc(emp.id)); });
       cambiosDirectorio.forEach(emp => {
          if(emp.id && emp.id.trim() !== '') {
            const docRef = db.collection('directorio_fime').doc(emp.id.trim());
-           batch.set(docRef, {
-             nombreCompleto: emp.nombreCompleto,
-             trayectoria: emp.trayectoria || '',
-             registrado: emp.registrado || false
-           }, { merge: true });
+           batch.set(docRef, { nombreCompleto: emp.nombreCompleto, trayectoria: emp.trayectoria || '', registrado: emp.registrado || false }, { merge: true });
          }
       });
-
       await batch.commit(); 
       setListaDirectorio(cambiosDirectorio);
       setModoEdicion(false);
-      alert("✅ Cambios guardados con éxito en la base de datos.");
-    } catch (err) {
-      alert("❌ Error al guardar: " + err.message);
-    }
+      alert("✅ Cambios guardados con éxito.");
+    } catch (err) { alert("❌ Error al guardar: " + err.message); }
     setCargando(false);
   };
 
-  // =========================================================
-  // FUNCIÓN ACTUALIZADA: REINICIA LAS PRE-ASISTENCIAS AL EDITAR
-  // =========================================================
   const guardarEvento = async (e) => {
     e.preventDefault();
-    if (!formEvento.titulo || !formEvento.fecha) {
-      alert("Por favor completa al menos el título y la fecha.");
-      return;
-    }
-
-    // Si estamos editando, lanzamos la advertencia antes de procesar nada
+    if (!formEvento.titulo || !formEvento.fecha) { alert("Por favor completa al menos el título y la fecha."); return; }
     if (editandoEventoId) {
       const confirmacion = window.confirm("⚠️ Al modificar este evento, se borrarán las pre-asistencias actuales para obligar a los docentes a confirmar con los nuevos datos. ¿Deseas continuar?");
-      if (!confirmacion) return; // Si dice cancelar, detenemos la función
+      if (!confirmacion) return;
     }
-
     setCargando(true);
     try {
       if (editandoEventoId) {
-        // 1. Actualizamos el evento
-        await db.collection('eventos_fime').doc(editandoEventoId).update({
-          titulo: formEvento.titulo,
-          descripcion: formEvento.descripcion,
-          fecha: formEvento.fecha,
-          hora: formEvento.hora,
-          portada: formEvento.portada
-        });
-
-        // 2. Borramos las pre-asistencias viejas
+        await db.collection('eventos_fime').doc(editandoEventoId).update({ titulo: formEvento.titulo, descripcion: formEvento.descripcion, fecha: formEvento.fecha, hora: formEvento.hora, portada: formEvento.portada });
         const snapshotPre = await db.collection('pre_asistencias').where('eventoId', '==', editandoEventoId).get();
         if (!snapshotPre.empty) {
           const batch = db.batch();
-          snapshotPre.docs.forEach((doc) => {
-            batch.delete(doc.ref);
-          });
-          await batch.commit(); // Ejecutamos el borrado masivo
+          snapshotPre.docs.forEach((doc) => { batch.delete(doc.ref); });
+          await batch.commit(); 
         }
-
         alert("✅ ¡Evento actualizado y pre-asistencias reiniciadas con éxito!");
       } else {
-        // Creación normal de evento
-        await db.collection('eventos_fime').add({
-          titulo: formEvento.titulo,
-          descripcion: formEvento.descripcion,
-          fecha: formEvento.fecha,
-          hora: formEvento.hora,
-          portada: formEvento.portada,
-          creado: firebase.firestore.FieldValue.serverTimestamp()
-        });
+        await db.collection('eventos_fime').add({ titulo: formEvento.titulo, descripcion: formEvento.descripcion, fecha: formEvento.fecha, hora: formEvento.hora, portada: formEvento.portada, creado: firebase.firestore.FieldValue.serverTimestamp() });
         alert("✅ ¡Evento creado con éxito!");
       }
-
       setFormEvento({ titulo: '', descripcion: '', fecha: '', hora: '', portada: 'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80' });
       setEditandoEventoId(null);
       navegarA('admin_eventos');
-    } catch (err) {
-      alert("❌ Error al guardar evento: " + err.message);
-    }
+    } catch (err) { alert("❌ Error al guardar evento: " + err.message); }
     setCargando(false);
   };
 
   const eliminarEvento = async () => {
     if (!editandoEventoId) return;
     const confirmacion = window.confirm("⚠️ Avisar a las personas registradas que el evento se eliminará permanentemente ya sea para algún cambio o su eliminación total");
-    
     if (confirmacion) {
       setCargando(true);
       try {
@@ -324,21 +340,13 @@ function App() {
         alert("🗑️ El evento ha sido eliminado permanentemente de la base de datos.");
         setEditandoEventoId(null);
         navegarA('admin_eventos');
-      } catch (err) {
-        alert("❌ Error al eliminar el evento: " + err.message);
-      }
+      } catch (err) { alert("❌ Error al eliminar el evento: " + err.message); }
       setCargando(false);
     }
   };
 
   const prepararEdicionEvento = (evento) => {
-    setFormEvento({
-      titulo: evento.titulo || '',
-      descripcion: evento.descripcion || '',
-      fecha: evento.fecha || '',
-      hora: evento.hora || '',
-      portada: evento.portada || ''
-    });
+    setFormEvento({ titulo: evento.titulo || '', descripcion: evento.descripcion || '', fecha: evento.fecha || '', hora: evento.hora || '', portada: evento.portada || '' });
     setEditandoEventoId(evento.id);
     setPantallaActual('registrar_evento');
   };
@@ -351,11 +359,20 @@ function App() {
   const themeBorder = esAdmin ? 'border-sky-500' : 'border-fime-main';
   const themeLightBg = esAdmin ? 'bg-sky-100' : 'bg-green-100';
 
-  if (pantallaActual === 'validacion' || pantallaActual === 'registro') {
+  // ==============================================================
+  // PANTALLAS DE INICIO (PANTALLA COMPLETA, SIN MENÚ)
+  // ==============================================================
+  if (pantallaActual === 'validacion' || pantallaActual === 'registro' || pantallaActual === 'confirmar_asistencia') {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center p-4">
+        
         {pantallaActual === 'validacion' && (
-          <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md border-t-8 border-fime-main">
+          <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md border-t-8 border-fime-main relative">
+            {qrEventoId && (
+               <div className="absolute -top-4 right-0 left-0 mx-auto w-max bg-yellow-400 text-yellow-900 text-xs font-bold px-3 py-1 rounded-full shadow">
+                 Modo Asistencia Rápida Activado 📷
+               </div>
+            )}
             <div className="text-center mb-8">
               <div className="w-20 h-20 bg-fime-light rounded-full mx-auto mb-4 border-2 border-fime-main flex items-center justify-center">
                 <span className="text-fime-main font-bold text-2xl">FIME</span>
@@ -367,26 +384,14 @@ function App() {
             <form onSubmit={manejarValidacion} className="space-y-5">
               <div>
                 <label className="block text-sm font-bold text-gray-700 mb-2">Clave de Acceso</label>
-                <input
-                  type="password"
-                  value={numEmpleado}
-                  onChange={(e) => setNumEmpleado(e.target.value)}
-                  placeholder="Ingresa tu clave"
-                  className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-fime-main"
-                  required
-                  disabled={cargando}
-                />
+                <input type="password" value={numEmpleado} onChange={(e) => setNumEmpleado(e.target.value)} placeholder="Ingresa tu clave" className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-fime-main" required disabled={cargando} />
               </div>
               {error && (
                 <div className="bg-red-50 border-l-4 border-red-500 p-3 rounded">
                   <p className="text-red-700 text-sm font-semibold">{error}</p>
                 </div>
               )}
-              <button 
-                type="submit" 
-                disabled={cargando}
-                className="w-full bg-fime-main text-white py-3 px-4 rounded-lg font-bold hover:bg-fime-dark transition-all flex justify-center items-center"
-              >
+              <button type="submit" disabled={cargando} className="w-full bg-fime-main text-white py-3 px-4 rounded-lg font-bold hover:bg-fime-dark transition-all flex justify-center items-center">
                 {cargando ? 'Consultando...' : 'Verificar Identidad'}
               </button>
             </form>
@@ -405,18 +410,58 @@ function App() {
               <p className="text-gray-600 text-sm mb-6">Identidad confirmada en el directorio FIME.</p>
             )}
 
-            <button
-              onClick={() => navegarA(esAdmin ? 'admin_eventos' : 'eventos')}
-              className={`w-full ${themeBg} text-white py-3 px-4 rounded-lg font-bold hover:${themeHover} transition-all`}
-            >
+            <button onClick={() => navegarA(esAdmin ? 'admin_eventos' : 'eventos')} className={`w-full ${themeBg} text-white py-3 px-4 rounded-lg font-bold hover:${themeHover} transition-all`}>
               Entrar al Sistema
             </button>
           </div>
         )}
+
+        {/* ============================================================== */}
+        {/* PANTALLA ESPECIAL: CONFIRMACIÓN FINAL POR QR                 */}
+        {/* ============================================================== */}
+        {pantallaActual === 'confirmar_asistencia' && (
+          <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md text-center border-t-8 border-green-500 transform transition-all">
+            
+            {!confirmacionExitosa ? (
+              <>
+                <div className="w-20 h-20 bg-green-100 text-green-600 rounded-full mx-auto mb-5 border-4 border-white flex items-center justify-center shadow-inner text-4xl">
+                  👋
+                </div>
+                <h2 className="text-2xl font-extrabold text-gray-800 mb-1">¡Hola de nuevo!</h2>
+                <p className="text-gray-800 font-bold mb-6">{nombreMaestro}</p>
+                <p className="text-gray-500 text-sm mb-8 font-medium">Estás a un paso de confirmar tu asistencia en sala para el evento.</p>
+                
+                <button 
+                  onClick={registrarAsistenciaFinal}
+                  disabled={cargando}
+                  className="w-full bg-green-600 text-white py-4 px-4 rounded-xl font-bold hover:bg-green-700 transition-all shadow-md flex justify-center items-center gap-2 text-lg"
+                >
+                  {cargando ? 'Registrando firma...' : '✅ Confirmar Asistencia'}
+                </button>
+                <button onClick={cerrarSesion} className="mt-4 text-gray-400 text-sm font-bold hover:text-gray-600">Cancelar y Salir</button>
+              </>
+            ) : (
+              <div className="animate-bounce-short">
+                <div className="w-20 h-20 bg-fime-light text-fime-main rounded-full mx-auto mb-5 border-4 border-white flex items-center justify-center shadow-inner text-4xl">
+                  🎉
+                </div>
+                <h2 className="text-2xl font-extrabold text-gray-800 mb-2">¡Confirmación Exitosa!</h2>
+                <p className="text-gray-600 mb-6 font-medium leading-relaxed">
+                  Gracias por asistir al evento. Que lo disfrutes.
+                </p>
+                <p className="text-fime-main text-xs font-bold animate-pulse">Cerrando sesión de forma segura...</p>
+              </div>
+            )}
+          </div>
+        )}
+
       </div>
     );
   }
 
+  // ==============================================================
+  // PANTALLAS CON MENÚ LATERAL (SISTEMA INTERNO)
+  // ==============================================================
   return (
     <div className="flex h-screen bg-gray-100 overflow-hidden relative">
       
@@ -510,19 +555,28 @@ function App() {
                         <p className="text-gray-600 text-sm mt-2 line-clamp-2">{evento.descripcion}</p>
                       </div>
                       
-                      <div className="mt-5 pt-3 border-t border-gray-100 flex justify-between items-center">
+                      {/* BOTONES DEL ADMIN EN LA TARJETA */}
+                      <div className="mt-5 pt-3 border-t border-gray-100 flex flex-wrap justify-between items-center gap-2">
                         <button 
                           onClick={() => abrirAsistenciasAdmin(evento)}
-                          className="text-sky-600 text-sm font-bold hover:underline"
+                          className="text-sky-600 text-sm font-bold hover:underline whitespace-nowrap"
                         >
-                          {cargando && eventoSeleccionado?.id === evento.id ? 'Cargando...' : 'Ver Asistencias →'}
+                          {cargando && eventoSeleccionado?.id === evento.id && !mostrarModalQR ? 'Cargando...' : 'Ver Asistencias →'}
                         </button>
-                        <button 
-                          onClick={() => prepararEdicionEvento(evento)}
-                          className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold py-1.5 px-3 rounded-lg transition-colors"
-                        >
-                          ✏️ Editar
-                        </button>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => abrirModalQR(evento)}
+                            className="bg-black hover:bg-gray-800 text-white text-xs font-bold py-1.5 px-3 rounded-lg transition-colors flex items-center gap-1"
+                          >
+                            📱 QR
+                          </button>
+                          <button 
+                            onClick={() => prepararEdicionEvento(evento)}
+                            className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold py-1.5 px-3 rounded-lg transition-colors"
+                          >
+                            ✏️ Editar
+                          </button>
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -531,10 +585,40 @@ function App() {
                 {listaEventos.length === 0 && (
                   <div className="col-span-full bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center text-gray-500">
                     <p className="font-medium text-lg">No hay eventos registrados en la base de datos.</p>
-                    <p className="text-sm mt-1 text-gray-400">Crea el primero usando el botón de arriba.</p>
                   </div>
                 )}
               </div>
+
+              {/* MODAL DEL CÓDIGO QR PARA EL ADMIN */}
+              {mostrarModalQR && (
+                <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => setMostrarModalQR(false)}>
+                  <div className="bg-white rounded-2xl shadow-2xl p-8 text-center max-w-sm w-full" onClick={e => e.stopPropagation()}>
+                    <h3 className="text-2xl font-extrabold text-gray-800 mb-2">Acceso Rápido</h3>
+                    <p className="text-gray-500 text-sm mb-6">Pide a los maestros escanear este código en la puerta para confirmar asistencia.</p>
+                    
+                    <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 inline-block mb-6 shadow-inner">
+                      {/* Genera el código QR al vuelo con una API gratuita */}
+                      <img 
+                        src={`https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(linkQRDinamico)}`} 
+                        alt="Código QR Asistencia" 
+                        className="w-48 h-48 mx-auto"
+                      />
+                    </div>
+                    
+                    <div className="bg-sky-50 text-sky-800 text-xs p-3 rounded-lg mb-6 break-all font-mono shadow-sm">
+                      {linkQRDinamico}
+                    </div>
+
+                    <button 
+                      onClick={() => setMostrarModalQR(false)}
+                      className="w-full bg-gray-800 text-white py-3 rounded-xl font-bold hover:bg-black transition-all shadow-md"
+                    >
+                      Cerrar
+                    </button>
+                  </div>
+                </div>
+              )}
+
             </div>
           )}
 
@@ -571,7 +655,10 @@ function App() {
                           <td className="p-4 text-center text-xl">
                             {preRegistradosEvento.includes(maestro.id) ? '✅' : '❗'}
                           </td>
-                          <td className="p-4 text-center text-xl">❗</td>
+                          <td className="p-4 text-center text-xl">
+                            {/* AQUÍ SE VERIFICA SI YA FIRMÓ POR EL QR */}
+                            {asistentesFinalesEvento.includes(maestro.id) ? '✅' : '❗'}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -581,6 +668,7 @@ function App() {
             </div>
           )}
 
+          {/* ... (LAS DEMÁS PANTALLAS DE ADMIN COMO MAESTROS Y REGISTRAR EVENTO SE MANTIENEN IGUAL) ... */}
           {pantallaActual === 'admin_maestros' && esAdmin && (
             <div className="flex flex-col h-full">
               <div className="flex justify-between items-center mb-6">
@@ -614,7 +702,6 @@ function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      
                       {!modoEdicion && listaDirectorio.map((maestro) => (
                         <tr key={maestro.id} className="hover:bg-gray-50 transition-colors">
                           <td className="p-4 text-sm text-gray-500">{maestro.trayectoria || '-'}</td>
@@ -622,23 +709,12 @@ function App() {
                           <td className="p-4 text-sm text-gray-800 font-medium">{maestro.nombreCompleto}</td>
                         </tr>
                       ))}
-
                       {modoEdicion && cambiosDirectorio.map((maestro, index) => (
                         <tr key={index} className="bg-sky-50/30">
-                          <td className="p-2">
-                            <input type="text" value={maestro.trayectoria} onChange={(e) => handleCambioInput(index, 'trayectoria', e.target.value)} className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm" placeholder="Ej. 10 años"/>
-                          </td>
-                          <td className="p-2">
-                            <input type="text" value={maestro.id} onChange={(e) => handleCambioInput(index, 'id', e.target.value)} className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm font-semibold" placeholder="No. Empleado"/>
-                          </td>
-                          <td className="p-2">
-                            <input type="text" value={maestro.nombreCompleto} onChange={(e) => handleCambioInput(index, 'nombreCompleto', e.target.value)} className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm" placeholder="Nombre completo"/>
-                          </td>
-                          <td className="p-2 text-center">
-                            <button onClick={() => eliminarFila(index)} className="text-red-500 hover:text-red-700 p-2 bg-red-50 rounded-lg">
-                              🗑️
-                            </button>
-                          </td>
+                          <td className="p-2"><input type="text" value={maestro.trayectoria} onChange={(e) => handleCambioInput(index, 'trayectoria', e.target.value)} className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm" placeholder="Ej. 10 años"/></td>
+                          <td className="p-2"><input type="text" value={maestro.id} onChange={(e) => handleCambioInput(index, 'id', e.target.value)} className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm font-semibold" placeholder="No. Empleado"/></td>
+                          <td className="p-2"><input type="text" value={maestro.nombreCompleto} onChange={(e) => handleCambioInput(index, 'nombreCompleto', e.target.value)} className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm" placeholder="Nombre completo"/></td>
+                          <td className="p-2 text-center"><button onClick={() => eliminarFila(index)} className="text-red-500 hover:text-red-700 p-2 bg-red-50 rounded-lg">🗑️</button></td>
                         </tr>
                       ))}
                     </tbody>
@@ -646,9 +722,7 @@ function App() {
                 </div>
                 {modoEdicion && (
                   <div className="p-4 border-t border-gray-100 bg-gray-50 text-center">
-                    <button onClick={agregarFila} className="text-sky-600 font-bold text-sm bg-sky-100 hover:bg-sky-200 px-4 py-2 rounded-lg transition-colors">
-                      ➕ Agregar Maestro
-                    </button>
+                    <button onClick={agregarFila} className="text-sky-600 font-bold text-sm bg-sky-100 hover:bg-sky-200 px-4 py-2 rounded-lg transition-colors">➕ Agregar Maestro</button>
                   </div>
                 )}
               </div>
@@ -658,172 +732,91 @@ function App() {
           {pantallaActual === 'registrar_evento' && esAdmin && (
             <div className="max-w-2xl mx-auto w-full">
               <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl md:text-3xl font-bold text-gray-800">
-                  {editandoEventoId ? 'Editar Evento' : 'Crear Nuevo Evento'}
-                </h2>
-                <button onClick={() => navegarA('admin_eventos')} className="text-gray-500 hover:text-gray-800 text-sm font-bold">
-                  &larr; Cancelar
-                </button>
+                <h2 className="text-2xl md:text-3xl font-bold text-gray-800">{editandoEventoId ? 'Editar Evento' : 'Crear Nuevo Evento'}</h2>
+                <button onClick={() => navegarA('admin_eventos')} className="text-gray-500 hover:text-gray-800 text-sm font-bold">&larr; Cancelar</button>
               </div>
-
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 md:p-8">
                 <form onSubmit={guardarEvento} className="space-y-5">
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">Título del Evento</label>
-                    <input type="text" value={formEvento.titulo} onChange={(e) => setFormEvento({...formEvento, titulo: e.target.value})} placeholder="Ej. Junta de Academia" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm" required />
-                  </div>
+                  <div><label className="block text-sm font-bold text-gray-700 mb-1">Título del Evento</label><input type="text" value={formEvento.titulo} onChange={(e) => setFormEvento({...formEvento, titulo: e.target.value})} placeholder="Ej. Junta de Academia" className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm" required /></div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1">Fecha</label>
-                      <input type="date" value={formEvento.fecha} onChange={(e) => setFormEvento({...formEvento, fecha: e.target.value})} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm" required />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1">Hora</label>
-                      <input type="time" value={formEvento.hora} onChange={(e) => setFormEvento({...formEvento, hora: e.target.value})} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm" />
-                    </div>
+                    <div><label className="block text-sm font-bold text-gray-700 mb-1">Fecha</label><input type="date" value={formEvento.fecha} onChange={(e) => setFormEvento({...formEvento, fecha: e.target.value})} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm" required /></div>
+                    <div><label className="block text-sm font-bold text-gray-700 mb-1">Hora</label><input type="time" value={formEvento.hora} onChange={(e) => setFormEvento({...formEvento, hora: e.target.value})} className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm" /></div>
                   </div>
+                  <div><label className="block text-sm font-bold text-gray-700 mb-1">Descripción corta</label><textarea rows="3" value={formEvento.descripcion} onChange={(e) => setFormEvento({...formEvento, descripcion: e.target.value})} placeholder="Detalles breves del evento..." className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"></textarea></div>
                   <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">Descripción corta</label>
-                    <textarea rows="3" value={formEvento.descripcion} onChange={(e) => setFormEvento({...formEvento, descripcion: e.target.value})} placeholder="Detalles breves del evento..." className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"></textarea>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-2">Selecciona una Portada Predefinida (o pega un link)</label>
+                    <label className="block text-sm font-bold text-gray-700 mb-2">Selecciona una Portada Predefinida</label>
                     <div className="grid grid-cols-2 gap-3 mb-3">
-                      {[
-                        { label: 'Académico', url: 'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80' },
-                        { label: 'Conferencia', url: 'https://images.unsplash.com/photo-1475721027785-f74eccf877e2?auto=format&fit=crop&w=600&q=80' },
-                        { label: 'Tecnología', url: 'https://images.unsplash.com/photo-1531482615713-2afd69097998?auto=format&fit=crop&w=600&q=80' },
-                        { label: 'Reunión', url: 'https://images.unsplash.com/photo-1522071820081-009f0129c71c?auto=format&fit=crop&w=600&q=80' }
-                      ].map((item, idx) => (
-                        <div key={idx} onClick={() => setFormEvento({...formEvento, portada: item.url})} className={`cursor-pointer border-2 rounded-lg p-2 text-center text-xs font-bold transition-all ${formEvento.portada === item.url ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-gray-200 text-gray-600'}`}>
-                          {item.label}
-                        </div>
+                      {[{ label: 'Académico', url: 'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80' },{ label: 'Conferencia', url: 'https://images.unsplash.com/photo-1475721027785-f74eccf877e2?auto=format&fit=crop&w=600&q=80' },{ label: 'Tecnología', url: 'https://images.unsplash.com/photo-1531482615713-2afd69097998?auto=format&fit=crop&w=600&q=80' },{ label: 'Reunión', url: 'https://images.unsplash.com/photo-1522071820081-009f0129c71c?auto=format&fit=crop&w=600&q=80' }].map((item, idx) => (
+                        <div key={idx} onClick={() => setFormEvento({...formEvento, portada: item.url})} className={`cursor-pointer border-2 rounded-lg p-2 text-center text-xs font-bold transition-all ${formEvento.portada === item.url ? 'border-sky-500 bg-sky-50 text-sky-700' : 'border-gray-200 text-gray-600'}`}>{item.label}</div>
                       ))}
                     </div>
                     <input type="text" value={formEvento.portada} onChange={(e) => setFormEvento({...formEvento, portada: e.target.value})} placeholder="O pega el link de una imagen..." className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-xs text-gray-500"/>
                   </div>
                   <div className="flex gap-3 pt-2">
-                    {editandoEventoId && (
-                      <button type="button" onClick={eliminarEvento} disabled={cargando} className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 py-3 px-4 rounded-lg font-bold transition-all text-sm flex items-center justify-center">
-                        🗑️ Eliminar
-                      </button>
-                    )}
-                    <button type="submit" disabled={cargando} className={`flex-1 ${themeBg} text-white py-3 px-4 rounded-lg font-bold hover:opacity-90 transition-all text-sm`}>
-                      {cargando ? 'Guardando en la nube...' : (editandoEventoId ? '💾 Actualizar Evento' : '🚀 Publicar Evento')}
-                    </button>
+                    {editandoEventoId && (<button type="button" onClick={eliminarEvento} disabled={cargando} className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 py-3 px-4 rounded-lg font-bold transition-all text-sm flex items-center justify-center">🗑️ Eliminar</button>)}
+                    <button type="submit" disabled={cargando} className={`flex-1 ${themeBg} text-white py-3 px-4 rounded-lg font-bold hover:opacity-90 transition-all text-sm`}>{cargando ? 'Guardando en la nube...' : (editandoEventoId ? '💾 Actualizar Evento' : '🚀 Publicar Evento')}</button>
                   </div>
                 </form>
               </div>
             </div>
           )}
 
-          {/* ============================================================== */}
-          {/* USUARIO NORMAL: LISTA DE EVENTOS (MODO LECTURA) */}
-          {/* ============================================================== */}
+          {/* VISTAS DE USUARIO NORMAL (SIN QR ACTIVO) */}
           {!esAdmin && pantallaActual === 'eventos' && (
             <div>
               <div className="mb-6">
                 <h2 className="text-2xl md:text-3xl font-bold text-gray-800">Próximos Eventos</h2>
                 <p className="text-gray-500 text-sm mt-1">Selecciona un evento para registrar tu pre-asistencia o ver los detalles.</p>
               </div>
-
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {listaEventos.map((evento) => (
                   <div key={evento.id} className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100 transition-transform hover:-translate-y-1">
-                    <div className="h-40 bg-gray-200 relative overflow-hidden">
-                      <img src={evento.portada} alt={evento.titulo} className="w-full h-full object-cover" />
-                    </div>
+                    <div className="h-40 bg-gray-200 relative overflow-hidden"><img src={evento.portada} alt={evento.titulo} className="w-full h-full object-cover" /></div>
                     <div className="p-5 flex-1 flex flex-col justify-between">
                       <div>
                         <h3 className="text-lg font-bold text-gray-800">{evento.titulo}</h3>
                         <p className="text-gray-500 text-xs mt-1">📅 {evento.fecha} • {evento.hora || 'Por definir'}</p>
                         <p className="text-gray-600 text-sm mt-2 line-clamp-2">{evento.descripcion}</p>
                       </div>
-                      
                       <div className="mt-5 pt-3 border-t border-gray-100">
-                        <button 
-                          onClick={() => abrirDetalleEventoUsuario(evento)}
-                          className="w-full bg-fime-main text-white py-2.5 rounded-lg font-bold hover:bg-fime-dark transition-all text-sm flex justify-center items-center gap-2"
-                        >
+                        <button onClick={() => abrirDetalleEventoUsuario(evento)} className="w-full bg-fime-main text-white py-2.5 rounded-lg font-bold hover:bg-fime-dark transition-all text-sm flex justify-center items-center gap-2">
                           {cargando && eventoSeleccionado?.id === evento.id ? 'Cargando...' : '👁️ Ver Detalles'}
                         </button>
                       </div>
                     </div>
                   </div>
                 ))}
-
-                {listaEventos.length === 0 && (
-                  <div className="col-span-full bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center text-gray-500">
-                    <p className="font-medium text-lg">No hay eventos próximos en este momento.</p>
-                  </div>
-                )}
               </div>
             </div>
           )}
 
-          {/* ============================================================== */}
-          {/* USUARIO NORMAL: DETALLE DEL EVENTO CON BOTONES */}
-          {/* ============================================================== */}
           {!esAdmin && pantallaActual === 'detalle_evento' && eventoSeleccionado && (
             <div className="max-w-3xl mx-auto w-full relative">
-              <button onClick={() => navegarA('eventos')} className="text-gray-500 hover:text-gray-800 text-sm font-bold mb-4 flex items-center transition-colors">
-                &larr; Regresar a Eventos
-              </button>
-              
+              <button onClick={() => navegarA('eventos')} className="text-gray-500 hover:text-gray-800 text-sm font-bold mb-4 flex items-center transition-colors">&larr; Regresar a Eventos</button>
               <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-100">
-                <div className="h-64 bg-gray-200 relative overflow-hidden">
-                  <img src={eventoSeleccionado.portada} alt={eventoSeleccionado.titulo} className="w-full h-full object-cover" />
-                </div>
+                <div className="h-64 bg-gray-200 relative overflow-hidden"><img src={eventoSeleccionado.portada} alt={eventoSeleccionado.titulo} className="w-full h-full object-cover" /></div>
                 <div className="p-6 md:p-8">
                   <h2 className="text-2xl md:text-3xl font-bold text-gray-800 mb-2">{eventoSeleccionado.titulo}</h2>
                   <div className="flex items-center space-x-4 text-sm text-gray-500 mb-6 font-medium">
                     <span className="flex items-center bg-gray-50 px-3 py-1 rounded-full border border-gray-100">📅 {eventoSeleccionado.fecha}</span>
                     <span className="flex items-center bg-gray-50 px-3 py-1 rounded-full border border-gray-100">⏰ {eventoSeleccionado.hora || 'Por definir'}</span>
                   </div>
-                  
-                  <div className="text-gray-600 mb-8 whitespace-pre-wrap leading-relaxed">
-                    {eventoSeleccionado.descripcion || 'Sin descripción detallada.'}
-                  </div>
-
+                  <div className="text-gray-600 mb-8 whitespace-pre-wrap leading-relaxed">{eventoSeleccionado.descripcion || 'Sin descripción detallada.'}</div>
                   <div className="flex flex-col sm:flex-row gap-4 border-t border-gray-100 pt-6">
-                    <button 
-                      onClick={() => navegarA('eventos')}
-                      className="flex-1 bg-gray-100 text-gray-700 py-3 px-4 rounded-lg font-bold hover:bg-gray-200 transition-all flex justify-center items-center"
-                    >
-                      Regresar
-                    </button>
-                    
-                    <button 
-                      onClick={registrarPreAsistencia}
-                      disabled={cargando || yaRegistrado}
-                      className={`flex-1 text-white py-3 px-4 rounded-lg font-bold transition-all flex justify-center items-center gap-2 ${
-                        yaRegistrado 
-                          ? 'bg-gray-400 cursor-not-allowed' 
-                          : 'bg-green-600 hover:bg-green-700 shadow-md hover:shadow-lg'
-                      }`}
-                    >
+                    <button onClick={() => navegarA('eventos')} className="flex-1 bg-gray-100 text-gray-700 py-3 px-4 rounded-lg font-bold hover:bg-gray-200 transition-all flex justify-center items-center">Regresar</button>
+                    <button onClick={registrarPreAsistencia} disabled={cargando || yaRegistrado} className={`flex-1 text-white py-3 px-4 rounded-lg font-bold transition-all flex justify-center items-center gap-2 ${yaRegistrado ? 'bg-gray-400 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700 shadow-md hover:shadow-lg'}`}>
                       {cargando ? 'Procesando...' : (yaRegistrado ? '✅ Ya estás registrado' : '✅ Pre-asistencia')}
                     </button>
                   </div>
                 </div>
               </div>
-
               {mostrarPopup && (
                 <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
                   <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center transform transition-all animate-bounce-short">
-                    <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner border-4 border-white">
-                      <span className="text-4xl">🎉</span>
-                    </div>
+                    <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner border-4 border-white"><span className="text-4xl">🎉</span></div>
                     <h3 className="text-2xl font-extrabold text-gray-800 mb-2">¡Pre-asistencia enviada!</h3>
-                    <p className="text-gray-600 mb-6 font-medium leading-relaxed">
-                      Tu registro para <strong className="text-gray-800">{eventoSeleccionado.titulo}</strong> ha sido confirmado exitosamente.
-                    </p>
-                    <button 
-                      onClick={() => setMostrarPopup(false)}
-                      className="w-full bg-green-600 text-white py-3 rounded-xl font-bold hover:bg-green-700 transition-all shadow-md hover:shadow-lg"
-                    >
-                      Entendido
-                    </button>
+                    <p className="text-gray-600 mb-6 font-medium leading-relaxed">Tu registro para <strong className="text-gray-800">{eventoSeleccionado.titulo}</strong> ha sido confirmado exitosamente.</p>
+                    <button onClick={() => setMostrarPopup(false)} className="w-full bg-green-600 text-white py-3 rounded-xl font-bold hover:bg-green-700 transition-all shadow-md hover:shadow-lg">Entendido</button>
                   </div>
                 </div>
               )}
