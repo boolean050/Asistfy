@@ -7,7 +7,7 @@ function App() {
   const [qrEventoId, setQrEventoId] = useState(urlEventoId);
 
   const [pantallaActual, setPantallaActual] = useState(() => {
-    return localStorage.getItem('pantallaFime') || 'validacion';
+    return sessionStorage.getItem('pantallaFime') || 'validacion';
   });
   const [numEmpleado, setNumEmpleado] = useState('');
   const [error, setError] = useState('');
@@ -17,7 +17,7 @@ function App() {
   const [menuAbierto, setMenuAbierto] = useState(false);
   
   const [esAdmin, setEsAdmin] = useState(() => {
-    return localStorage.getItem('esAdminFime') === 'true';
+    return sessionStorage.getItem('esAdminFime') === 'true';
   });
 
   const [listaDirectorio, setListaDirectorio] = useState([]);
@@ -44,8 +44,8 @@ function App() {
 
   // === EFECTOS DE GUARDADO Y CARGA INICIAL ===
   useEffect(() => {
-    localStorage.setItem('pantallaFime', pantallaActual);
-    localStorage.setItem('esAdminFime', esAdmin);
+    sessionStorage.setItem('pantallaFime', pantallaActual);
+    sessionStorage.setItem('esAdminFime', esAdmin);
   }, [pantallaActual, esAdmin]);
 
   useEffect(() => {
@@ -223,9 +223,10 @@ function App() {
     }
   };
 
+  //Funcion para cerrar sesion si se sale de la pgaina y no se almacena la sesion  de froma local
   const cerrarSesion = () => {
-    localStorage.removeItem('pantallaFime');
-    localStorage.removeItem('esAdminFime');
+    sessionStorage.removeItem('pantallaFime');
+    sessionStorage.removeItem('esAdminFime');
     setPantallaActual('validacion');
     setNumEmpleado('');
     setNombreMaestro('');
