@@ -31,7 +31,7 @@ function App() {
   
   // ESTADOS DE ASISTENCIAS
   const [preRegistradosEvento, setPreRegistradosEvento] = useState([]);
-  const [asistentesFinalesEvento, setAsistentesFinalesEvento] = useState([]); // Nueva tabla
+  const [asistentesFinalesEvento, setAsistentesFinalesEvento] = useState([]); 
   const [yaRegistrado, setYaRegistrado] = useState(false);
 
   // ESTADOS DEL QR Y CONFIRMACIÓN FINAL
@@ -42,6 +42,7 @@ function App() {
   const [formEvento, setFormEvento] = useState({ titulo: '', descripcion: '', fecha: '', hora: '', portada: 'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80' });
   const [editandoEventoId, setEditandoEventoId] = useState(null);
 
+  // === EFECTOS DE GUARDADO Y CARGA INICIAL ===
   useEffect(() => {
     localStorage.setItem('pantallaFime', pantallaActual);
     localStorage.setItem('esAdminFime', esAdmin);
@@ -57,6 +58,97 @@ function App() {
     }
   }, [pantallaActual, esAdmin]);
 
+  // === EFECTOS EN TIEMPO REAL (ADIÓS AL F5 Y RETRASOS) ===
+  useEffect(() => {
+    let unsubscribePre = null;
+    let unsubscribeAsis = null;
+    let unsubscribeUsuario = null;
+
+    // 1. Seguro Anti-F5
+    if ((pantallaActual === 'admin_asistencia_evento' || pantallaActual === 'detalle_evento') && !eventoSeleccionado) {
+      setPantallaActual(esAdmin ? 'admin_eventos' : 'eventos');
+      return;
+    }
+
+    // 2. Tiempo real para el ADMIN
+    if (esAdmin && pantallaActual === 'admin_asistencia_evento' && eventoSeleccionado) {
+      unsubscribePre = db.collection('pre_asistencias')
+        .where('eventoId', '==', eventoSeleccionado.id)
+        .onSnapshot((snapshot) => {
+          const listaPre = snapshot.docs.map(doc => doc.data().numEmpleado);
+          setPreRegistradosEvento(listaPre);
+        });
+
+      unsubscribeAsis = db.collection('asistencias')
+        .where('eventoId', '==', eventoSeleccionado.id)
+        .onSnapshot((snapshot) => {
+          const listaAsis = snapshot.docs.map(doc => doc.data().numEmpleado);
+          setAsistentesFinalesEvento(listaAsis);
+        });
+    }
+
+    // 3. Tiempo real para el USUARIO
+    if (!esAdmin && pantallaActual === 'detalle_evento' && eventoSeleccionado && numEmpleado) {
+      const docIdUnico = `${eventoSeleccionado.id}_${numEmpleado}`;
+      unsubscribeUsuario = db.collection('pre_asistencias').doc(docIdUnico)
+        .onSnapshot((doc) => {
+          setYaRegistrado(doc.exists);
+        });
+    }
+
+    return () => {
+      if (unsubscribePre) unsubscribePre();
+      if (unsubscribeAsis) unsubscribeAsis();
+      if (unsubscribeUsuario) unsubscribeUsuario();
+    };
+  }, [pantallaActual, eventoSeleccionado, esAdmin, numEmpleado]);
+
+  // === NUEVO: EFECTO DE INACTIVIDAD (3 MINUTOS) ===
+  useEffect(() => {
+    // Si no ha iniciado sesión o está firmando por QR, no activamos el contador
+    if (pantallaActual === 'validacion' || pantallaActual === 'confirmar_asistencia') return;
+
+    const TIEMPO_LIMITE = 3 * 60 * 1000; // 3 minutos en milisegundos
+    let timeoutId;
+    let ultimoActivo = Date.now();
+
+    const verificarYcerrar = () => {
+      if (Date.now() - ultimoActivo >= TIEMPO_LIMITE) {
+        cerrarSesion();
+        alert("⚠️ Tu sesión ha sido cerrada automáticamente por inactividad.");
+      }
+    };
+
+    const reiniciarTimer = () => {
+      ultimoActivo = Date.now();
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(verificarYcerrar, TIEMPO_LIMITE);
+    };
+
+    const checarAlVolver = () => {
+      // Si regresa a la pestaña y ya pasaron 3 minutos, se cierra.
+      if (!document.hidden) {
+        verificarYcerrar();
+      }
+    };
+
+    const eventosUsuario = ['mousemove', 'keydown', 'scroll', 'touchstart', 'click'];
+    
+    eventosUsuario.forEach(evt => window.addEventListener(evt, reiniciarTimer));
+    document.addEventListener('visibilitychange', checarAlVolver);
+
+    reiniciarTimer();
+
+    return () => {
+      clearTimeout(timeoutId);
+      eventosUsuario.forEach(evt => window.removeEventListener(evt, reiniciarTimer));
+      document.removeEventListener('visibilitychange', checarAlVolver);
+    };
+  }, [pantallaActual]);
+
+  // ==========================================
+  // FUNCIONES DE CARGA Y VALIDACIÓN
+  // ==========================================
   const obtenerMaestros = async () => {
     try {
       const snapshot = await db.collection('directorio_fime').get();
@@ -115,7 +207,6 @@ function App() {
         setNombreMaestro(datos.nombreCompleto);
         setEsAdmin(false); 
         
-        // AQUÍ ESTÁ LA MAGIA: Si hay un QR activo en el link, lo mandamos a la pantalla especial
         if (qrEventoId) {
           setPantallaActual('confirmar_asistencia');
         } else {
@@ -154,32 +245,14 @@ function App() {
   };
 
   // ==========================================
-  // FUNCIONES DE ADMIN
+  // FUNCIONES DE ADMIN (SIMPLIFICADAS POR EL TIEMPO REAL)
   // ==========================================
-  const abrirAsistenciasAdmin = async (evento) => {
+  const abrirAsistenciasAdmin = (evento) => {
     setEventoSeleccionado(evento);
-    setCargando(true);
-    try {
-      // Cargamos pre-asistencias
-      const snapshotPre = await db.collection('pre_asistencias').where('eventoId', '==', evento.id).get();
-      const listaPre = snapshotPre.docs.map(doc => doc.data().numEmpleado);
-      setPreRegistradosEvento(listaPre);
-
-      // Cargamos asistencias finales (La firma real)
-      const snapshotAsis = await db.collection('asistencias').where('eventoId', '==', evento.id).get();
-      const listaAsis = snapshotAsis.docs.map(doc => doc.data().numEmpleado);
-      setAsistentesFinalesEvento(listaAsis);
-
-      navegarA('admin_asistencia_evento');
-    } catch (err) {
-      console.error("Error al cargar registros:", err);
-      alert("Hubo un error al cargar los registros.");
-    }
-    setCargando(false);
+    navegarA('admin_asistencia_evento');
   };
 
   const abrirModalQR = (evento) => {
-    // Genera el link exacto donde esté alojada tu página y le pega el ID del evento
     const baseUrl = window.location.origin + window.location.pathname;
     const qrLink = `${baseUrl}?asistencia=${evento.id}`;
     
@@ -201,7 +274,6 @@ function App() {
       if (docSnap.exists) {
         alert("Ya habías confirmado tu asistencia a este evento anteriormente.");
       } else {
-        // Registramos la firma en la nube
         await docRef.set({
           eventoId: qrEventoId,
           numEmpleado: numEmpleado,
@@ -209,10 +281,8 @@ function App() {
           fechaFirma: firebase.firestore.FieldValue.serverTimestamp()
         });
         
-        // Activamos la vista de éxito
         setConfirmacionExitosa(true);
 
-        // A los 3.5 segundos, limpiamos el link y lo sacamos
         setTimeout(() => {
           window.history.replaceState({}, document.title, window.location.pathname);
           setQrEventoId(null);
@@ -227,21 +297,11 @@ function App() {
   };
 
   // ==========================================
-  // FUNCIONES DE USUARIO Y EVENTOS
+  // FUNCIONES DE USUARIO Y EVENTOS (SIMPLIFICADAS)
   // ==========================================
-  const abrirDetalleEventoUsuario = async (evento) => {
+  const abrirDetalleEventoUsuario = (evento) => {
     setEventoSeleccionado(evento);
-    setCargando(true);
-    try {
-      const docIdUnico = `${evento.id}_${numEmpleado}`;
-      const docSnap = await db.collection('pre_asistencias').doc(docIdUnico).get();
-      setYaRegistrado(docSnap.exists);
-      navegarA('detalle_evento');
-    } catch (err) {
-      console.error("Error al verificar registro:", err);
-      navegarA('detalle_evento');
-    }
-    setCargando(false);
+    navegarA('detalle_evento');
   };
 
   const registrarPreAsistencia = async () => {
@@ -274,7 +334,9 @@ function App() {
     setCargando(false);
   };
 
-  // (FUNCIONES DE EDICIÓN Y GUARDADO DE TABLA/EVENTOS SE MANTIENEN INTACTAS)
+  // ==========================================
+  // EDICIÓN DE DIRECTORIO Y EVENTOS
+  // ==========================================
   const iniciarEdicion = () => { setCambiosDirectorio(JSON.parse(JSON.stringify(listaDirectorio))); setModoEdicion(true); };
   const cancelarEdicion = () => { setModoEdicion(false); setCambiosDirectorio([]); };
   const handleCambioInput = (index, campo, valor) => { const nuevaLista = [...cambiosDirectorio]; nuevaLista[index][campo] = valor; setCambiosDirectorio(nuevaLista); };
@@ -416,9 +478,6 @@ function App() {
           </div>
         )}
 
-        {/* ============================================================== */}
-        {/* PANTALLA ESPECIAL: CONFIRMACIÓN FINAL POR QR                 */}
-        {/* ============================================================== */}
         {pantallaActual === 'confirmar_asistencia' && (
           <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md text-center border-t-8 border-green-500 transform transition-all">
             
@@ -555,13 +614,12 @@ function App() {
                         <p className="text-gray-600 text-sm mt-2 line-clamp-2">{evento.descripcion}</p>
                       </div>
                       
-                      {/* BOTONES DEL ADMIN EN LA TARJETA */}
                       <div className="mt-5 pt-3 border-t border-gray-100 flex flex-wrap justify-between items-center gap-2">
                         <button 
                           onClick={() => abrirAsistenciasAdmin(evento)}
                           className="text-sky-600 text-sm font-bold hover:underline whitespace-nowrap"
                         >
-                          {cargando && eventoSeleccionado?.id === evento.id && !mostrarModalQR ? 'Cargando...' : 'Ver Asistencias →'}
+                          Ver Asistencias →
                         </button>
                         <div className="flex gap-2">
                           <button 
@@ -589,7 +647,6 @@ function App() {
                 )}
               </div>
 
-              {/* MODAL DEL CÓDIGO QR PARA EL ADMIN */}
               {mostrarModalQR && (
                 <div className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={() => setMostrarModalQR(false)}>
                   <div className="bg-white rounded-2xl shadow-2xl p-8 text-center max-w-sm w-full" onClick={e => e.stopPropagation()}>
@@ -597,7 +654,6 @@ function App() {
                     <p className="text-gray-500 text-sm mb-6">Pide a los maestros escanear este código en la puerta para confirmar asistencia.</p>
                     
                     <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 inline-block mb-6 shadow-inner">
-                      {/* Genera el código QR al vuelo con una API gratuita */}
                       <img 
                         src={`https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(linkQRDinamico)}`} 
                         alt="Código QR Asistencia" 
@@ -656,7 +712,6 @@ function App() {
                             {preRegistradosEvento.includes(maestro.id) ? '✅' : '❗'}
                           </td>
                           <td className="p-4 text-center text-xl">
-                            {/* AQUÍ SE VERIFICA SI YA FIRMÓ POR EL QR */}
                             {asistentesFinalesEvento.includes(maestro.id) ? '✅' : '❗'}
                           </td>
                         </tr>
@@ -668,7 +723,6 @@ function App() {
             </div>
           )}
 
-          {/* ... (LAS DEMÁS PANTALLAS DE ADMIN COMO MAESTROS Y REGISTRAR EVENTO SE MANTIENEN IGUAL) ... */}
           {pantallaActual === 'admin_maestros' && esAdmin && (
             <div className="flex flex-col h-full">
               <div className="flex justify-between items-center mb-6">
@@ -761,7 +815,6 @@ function App() {
             </div>
           )}
 
-          {/* VISTAS DE USUARIO NORMAL (SIN QR ACTIVO) */}
           {!esAdmin && pantallaActual === 'eventos' && (
             <div>
               <div className="mb-6">
@@ -780,7 +833,7 @@ function App() {
                       </div>
                       <div className="mt-5 pt-3 border-t border-gray-100">
                         <button onClick={() => abrirDetalleEventoUsuario(evento)} className="w-full bg-fime-main text-white py-2.5 rounded-lg font-bold hover:bg-fime-dark transition-all text-sm flex justify-center items-center gap-2">
-                          {cargando && eventoSeleccionado?.id === evento.id ? 'Cargando...' : '👁️ Ver Detalles'}
+                          👁️ Ver Detalles
                         </button>
                       </div>
                     </div>
@@ -810,13 +863,26 @@ function App() {
                   </div>
                 </div>
               </div>
+              
+              {/* MODAL DE ÉXITO ACTUALIZADO */}
               {mostrarPopup && (
                 <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
                   <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center transform transition-all animate-bounce-short">
                     <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner border-4 border-white"><span className="text-4xl">🎉</span></div>
                     <h3 className="text-2xl font-extrabold text-gray-800 mb-2">¡Pre-asistencia enviada!</h3>
                     <p className="text-gray-600 mb-6 font-medium leading-relaxed">Tu registro para <strong className="text-gray-800">{eventoSeleccionado.titulo}</strong> ha sido confirmado exitosamente.</p>
-                    <button onClick={() => setMostrarPopup(false)} className="w-full bg-green-600 text-white py-3 rounded-xl font-bold hover:bg-green-700 transition-all shadow-md hover:shadow-lg">Entendido</button>
+                    
+                    {/* AQUÍ LA MAGIA DEL BOTÓN PARA REGRESAR AL INICIO */}
+                    <button 
+                      onClick={() => {
+                        setMostrarPopup(false);
+                        navegarA('eventos');
+                      }} 
+                      className="w-full bg-green-600 text-white py-3 rounded-xl font-bold hover:bg-green-700 transition-all shadow-md hover:shadow-lg"
+                    >
+                      Entendido
+                    </button>
+                    
                   </div>
                 </div>
               )}
