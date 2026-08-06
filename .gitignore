@@ -1,10 +1,13 @@
 # Dependencias y Entornos
 node_modules/
 .env
-.env/local
+.env.local
 
-#Archvios del sistema operativo y  editores
+#Archivos del sistema operativo y editores
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
+
+#Carpetas por ignorar
+Manual_de_usuario/
