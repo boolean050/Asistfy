@@ -43,9 +43,13 @@ function App() {
     titulo: "",
     descripcion: "",
     fecha: "",
+    fechaFin: "", // NUEVO
     hora: "",
+    horaFin: "", // NUEVO
     portada:
       "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80",
+    tipo: "publico",
+    esMultiDia: false, // NUEVO: Controla el switch de varios días
   });
   const [editandoEventoId, setEditandoEventoId] = useState(null);
 
@@ -55,6 +59,18 @@ function App() {
   const [busquedaAsistencias, setBusquedaAsistencias] = useState("");
   const [menuDescargaAbierto, setMenuDescargaAbierto] = useState(false);
 
+// === CÁLCULO DE DÍAS PARA EVENTOS MULTI-DÍA ===
+  const calcularDiasEvento = (fechaInicio, fechaFin, esMultiDia) => {
+    if (!esMultiDia || !fechaFin || !fechaInicio) return 1;
+    // Convertimos a fechas forzando la zona horaria local para evitar brincos de día
+    const inicio = new Date(`${fechaInicio}T00:00:00`);
+    const fin = new Date(`${fechaFin}T00:00:00`);
+    const diferenciaMs = fin - inicio;
+    const dias = Math.ceil(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
+    return dias > 0 ? dias : 1; // Si por error ponen fecha fin anterior a la de inicio, regresa 1
+  };
+
+  
   // === EFECTOS DE GUARDADO Y CARGA INICIAL ===
   useEffect(() => {
     sessionStorage.setItem("pantallaFime", pantallaActual);
@@ -459,8 +475,9 @@ function App() {
 
   const guardarEvento = async (e) => {
     e.preventDefault();
-    if (!formEvento.titulo || !formEvento.fecha) {
-      alert("Por favor completa al menos el título y la fecha.");
+    // NUEVA VALIDACIÓN: Exigimos título, fecha y descripción
+    if (!formEvento.titulo || !formEvento.fecha || !formEvento.descripcion) {
+      alert("Por favor completa el título, la fecha y la descripción corta.");
       return;
     }
     if (editandoEventoId) {
@@ -481,7 +498,10 @@ function App() {
           titulo: formEvento.titulo,
           descripcion: formEvento.descripcion,
           fecha: formEvento.fecha,
+          fechaFin: formEvento.fechaFin || "", // NUEVO
           hora: formEvento.hora,
+          horaFin: formEvento.horaFin || "", // NUEVO
+          esMultiDia: formEvento.esMultiDia || false, // NUEVO
           portada: formEvento.portada,
           tipo: formEvento.tipo,
         });
@@ -504,12 +524,14 @@ function App() {
           titulo: formEvento.titulo,
           descripcion: formEvento.descripcion,
           fecha: formEvento.fecha,
+          fechaFin: formEvento.fechaFin || "", // NUEVO
           hora: formEvento.hora,
+          horaFin: formEvento.horaFin || "", // NUEVO
+          esMultiDia: formEvento.esMultiDia || false, // NUEVO
           portada: formEvento.portada,
           tipo: formEvento.tipo || "publico",
           creado: firebase.firestore.FieldValue.serverTimestamp(),
         });
-        alert("✅ ¡Evento creado con éxito!");
       }
 
       setFormEvento({
@@ -559,8 +581,12 @@ function App() {
       titulo: evento.titulo || "",
       descripcion: evento.descripcion || "",
       fecha: evento.fecha || "",
+      fechaFin: evento.fechaFin || "", // Agregado
       hora: evento.hora || "",
+      horaFin: evento.horaFin || "", // Agregado
       portada: evento.portada || "",
+      esMultiDia: evento.esMultiDia || false, // Agregado
+      tipo: evento.tipo || "publico"
     });
     setEditandoEventoId(evento.id);
     setPantallaActual("registrar_evento");
@@ -984,7 +1010,10 @@ function App() {
                         titulo: "",
                         descripcion: "",
                         fecha: "",
+                        fechaFin: "", // Agregado
                         hora: "",
+                        horaFin: "", // Agregado
+                        esMultiDia: false, // Agregado
                         portada:
                           "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80",
                         tipo:
@@ -1178,53 +1207,52 @@ function App() {
               />
 
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex-1 overflow-hidden flex flex-col">
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse">
-                    <thead>
-                      <tr className="bg-gray-50 border-b border-gray-200">
-                        <th className="p-4 text-sm font-bold text-gray-600">
-                          NO. EMPLEADO
-                        </th>
-                        <th className="p-4 text-sm font-bold text-gray-600">
-                          NOMBRE DEL DOCENTE
-                        </th>
-                        <th className="p-4 text-sm font-bold text-gray-600 text-center">
-                          PRE-ASISTENCIA
-                        </th>
-                        <th className="p-4 text-sm font-bold text-gray-600 text-center">
-                          FIRMA (ASISTENCIA)
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {maestrosFiltradosAsistencia
-                        .filter((maestro) => eventoSeleccionado?.tipo === "interno" ? preRegistradosEvento.includes(maestro.id) : true)
-                        .map((maestro) => (
-                        <tr
-                          key={maestro.id}
-                          className="hover:bg-gray-50 transition-colors"
-                        >
-                          <td className="p-4 text-sm font-semibold text-gray-700">
-                            {maestro.id}
-                          </td>
-                          <td className="p-4 text-sm text-gray-800 font-medium">
-                            {maestro.nombreCompleto}
-                          </td>
-                          <td className="p-4 text-center text-xl">
-                            {preRegistradosEvento.includes(maestro.id)
-                              ? "✅"
-                              : "❗"}
-                          </td>
-                          <td className="p-4 text-center text-xl">
-                            {asistentesFinalesEvento.includes(maestro.id)
-                              ? "✅"
-                              : "❗"}
-                          </td>
+                {/* VARIABLE QUE CALCULA LOS DÍAS EN VIVO */}
+              {(() => {
+                const numDias = eventoSeleccionado ? calcularDiasEvento(eventoSeleccionado.fecha, eventoSeleccionado.fechaFin, eventoSeleccionado.esMultiDia) : 1;
+                
+                return (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                      <thead>
+                        <tr className="bg-gray-50 border-b border-gray-200">
+                          <th className="p-4 text-sm font-bold text-gray-600">NO. EMPLEADO</th>
+                          <th className="p-4 text-sm font-bold text-gray-600">NOMBRE DEL DOCENTE</th>
+                          <th className="p-4 text-sm font-bold text-gray-600 text-center">PRE-ASISTENCIA</th>
+                          
+                          {/* DIBUJAMOS LOS ENCABEZADOS DINÁMICAMENTE SEGÚN LOS DÍAS */}
+                          {[...Array(numDias)].map((_, index) => (
+                            <th key={index} className="p-4 text-sm font-bold text-gray-600 text-center">
+                              DÍA {index + 1}
+                            </th>
+                          ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {maestrosFiltradosAsistencia
+                          .filter((maestro) => eventoSeleccionado?.tipo === "interno" ? preRegistradosEvento.includes(maestro.id) : true)
+                          .map((maestro) => (
+                          <tr key={maestro.id} className="hover:bg-gray-50 transition-colors">
+                            <td className="p-4 text-sm font-semibold text-gray-700">{maestro.id}</td>
+                            <td className="p-4 text-sm text-gray-800 font-medium">{maestro.nombreCompleto}</td>
+                            <td className="p-4 text-center text-xl">
+                              {preRegistradosEvento.includes(maestro.id) ? "✅" : "❗"}
+                            </td>
+                            
+                            {/* DIBUJAMOS LAS CELDAS DE ASISTENCIA DINÁMICAMENTE */}
+                            {[...Array(numDias)].map((_, index) => (
+                              <td key={index} className="p-4 text-center text-xl bg-gray-50/30 border-l border-gray-100">
+                                {/* Placeholder temporal */}
+                                {asistentesFinalesEvento.includes(maestro.id) ? "✅" : "❗"}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                );
+              })()}
               </div>
             </div>
           )}
@@ -1399,9 +1427,33 @@ function App() {
               </div>
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 md:p-8">
                 <form onSubmit={guardarEvento} className="space-y-5">
+                  {/* NUEVO: SELECTOR DE DURACIÓN (SOLO EVENTOS INTERNOS) */}
+                  {formEvento.tipo === "interno" && (
+                    <div className="bg-sky-50 p-4 rounded-xl border border-sky-100 mb-2">
+                      <label className="block text-sm font-bold text-gray-700 mb-3 text-center">
+                        ¿Cuál es la duración de esta reunión?
+                      </label>
+                      <div className="flex justify-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setFormEvento({ ...formEvento, esMultiDia: false, fechaFin: "", horaFin: "" })}
+                          className={`px-5 py-2 rounded-lg font-bold text-sm transition-all ${!formEvento.esMultiDia ? "bg-sky-600 text-white shadow-md" : "bg-white text-gray-500 border border-gray-200 hover:bg-gray-50"}`}
+                        >
+                          📅 Único Día
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFormEvento({ ...formEvento, esMultiDia: true })}
+                          className={`px-5 py-2 rounded-lg font-bold text-sm transition-all ${formEvento.esMultiDia ? "bg-sky-600 text-white shadow-md" : "bg-white text-gray-500 border border-gray-200 hover:bg-gray-50"}`}
+                        >
+                          🗓️ Varios Días
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   <div>
                     <label className="block text-sm font-bold text-gray-700 mb-1">
-                      Título del Evento
+                      Título del Evento <span className="text-red-500">*</span>
                     </label>
                     <input
                       type="text"
@@ -1415,40 +1467,65 @@ function App() {
                     />
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {/* FECHA (INICIO) */}
                     <div>
                       <label className="block text-sm font-bold text-gray-700 mb-1">
-                        Fecha
+                        {formEvento.esMultiDia ? "Fecha Inicio" : "Fecha"} <span className="text-red-500">*</span>
                       </label>
                       <input
                         type="date"
                         value={formEvento.fecha}
-                        onChange={(e) =>
-                          setFormEvento({
-                            ...formEvento,
-                            fecha: e.target.value,
-                          })
-                        }
+                        onChange={(e) => setFormEvento({ ...formEvento, fecha: e.target.value })}
                         className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
                         required
                       />
                     </div>
+                    {/* HORA (INICIO) */}
                     <div>
                       <label className="block text-sm font-bold text-gray-700 mb-1">
-                        Hora
+                        {formEvento.esMultiDia ? "Hora Inicio" : "Hora"} <span className="text-red-500">*</span>
                       </label>
                       <input
                         type="time"
                         value={formEvento.hora}
-                        onChange={(e) =>
-                          setFormEvento({ ...formEvento, hora: e.target.value })
-                        }
+                        onChange={(e) => setFormEvento({ ...formEvento, hora: e.target.value })}
                         className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+                        required
                       />
                     </div>
+                    
+                    {/* FECHAS FINALES (SE MUESTRAN SOLO SI ES MULTI DÍA) */}
+                    {formEvento.esMultiDia && (
+                      <>
+                        <div>
+                          <label className="block text-sm font-bold text-gray-700 mb-1">
+                            Fecha Fin <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            type="date"
+                            value={formEvento.fechaFin}
+                            onChange={(e) => setFormEvento({ ...formEvento, fechaFin: e.target.value })}
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+                            required={formEvento.esMultiDia}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-sm font-bold text-gray-700 mb-1">
+                            Hora Fin <span className="text-gray-400 font-normal">(Opcional)</span>
+                          </label>
+                          <input
+                            type="time"
+                            value={formEvento.horaFin}
+                            onChange={(e) => setFormEvento({ ...formEvento, horaFin: e.target.value })}
+                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+                          />
+                        </div>
+                      </>
+                    )}
                   </div>
                   <div>
                     <label className="block text-sm font-bold text-gray-700 mb-1">
-                      Descripción corta
+                      Descripción corta <span className="text-red-500">*</span>
                     </label>
                     <textarea
                       rows="3"
@@ -1461,6 +1538,7 @@ function App() {
                       }
                       placeholder="Detalles breves del evento..."
                       className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+                      required
                     ></textarea>
                   </div>
                   <div>
@@ -1568,8 +1646,10 @@ function App() {
                           {evento.titulo}
                         </h3>
                         <p className="text-gray-500 text-xs mt-1">
-                          📅 {evento.fecha} • {evento.hora || "Por definir"}
-                        </p>
+  📅 {evento.fecha} {evento.esMultiDia && evento.fechaFin ? `al ${evento.fechaFin}` : ""} 
+  {" "}•{" "} 
+  {evento.hora || "Por definir"} {evento.horaFin ? `- ${evento.horaFin}` : ""}
+</p>
                         <p className="text-gray-600 text-sm mt-2 line-clamp-2">
                           {evento.descripcion}
                         </p>
