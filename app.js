@@ -459,50 +459,77 @@ function App() {
 
   const guardarEvento = async (e) => {
     e.preventDefault();
-    if (!formEvento.titulo || !formEvento.fecha) { alert("Por favor completa al menos el título y la fecha."); return; }
+    if (!formEvento.titulo || !formEvento.fecha) {
+      alert("Por favor completa al menos el título y la fecha.");
+      return;
+    }
     if (editandoEventoId) {
-      const confirmacion = window.confirm("⚠️ Al modificar este evento, se borrarán las pre-asistencias actuales. ¿Deseas continuar?");
+      const confirmacion = window.confirm(
+        "⚠️ Al modificar este evento, se borrarán las pre-asistencias actuales. ¿Deseas continuar?",
+      );
       if (!confirmacion) return;
     }
     setCargando(true);
-    
+
     // Definir a qué colección se va a guardar según su tipo
-    const coleccionDestino = formEvento.tipo === 'interno' ? 'eventos_internos_fime' : 'eventos_fime';
+    const coleccionDestino =
+      formEvento.tipo === "interno" ? "eventos_internos_fime" : "eventos_fime";
 
     try {
       if (editandoEventoId) {
-        await db.collection(coleccionDestino).doc(editandoEventoId).update({ 
-          titulo: formEvento.titulo, 
-          descripcion: formEvento.descripcion, 
-          fecha: formEvento.fecha, 
-          hora: formEvento.hora, 
+        await db.collection(coleccionDestino).doc(editandoEventoId).update({
+          titulo: formEvento.titulo,
+          descripcion: formEvento.descripcion,
+          fecha: formEvento.fecha,
+          hora: formEvento.hora,
           portada: formEvento.portada,
-          tipo: formEvento.tipo 
+          tipo: formEvento.tipo,
         });
-        const snapshotPre = await db.collection('pre_asistencias').where('eventoId', '==', editandoEventoId).get();
+        const snapshotPre = await db
+          .collection("pre_asistencias")
+          .where("eventoId", "==", editandoEventoId)
+          .get();
         if (!snapshotPre.empty) {
           const batch = db.batch();
-          snapshotPre.docs.forEach((doc) => { batch.delete(doc.ref); });
-          await batch.commit(); 
+          snapshotPre.docs.forEach((doc) => {
+            batch.delete(doc.ref);
+          });
+          await batch.commit();
         }
-        alert("✅ ¡Evento actualizado y pre-asistencias reiniciadas con éxito!");
+        alert(
+          "✅ ¡Evento actualizado y pre-asistencias reiniciadas con éxito!",
+        );
       } else {
-        await db.collection(coleccionDestino).add({ 
-          titulo: formEvento.titulo, 
-          descripcion: formEvento.descripcion, 
-          fecha: formEvento.fecha, 
-          hora: formEvento.hora, 
-          portada: formEvento.portada, 
-          tipo: formEvento.tipo || 'publico',
-          creado: firebase.firestore.FieldValue.serverTimestamp() 
+        await db.collection(coleccionDestino).add({
+          titulo: formEvento.titulo,
+          descripcion: formEvento.descripcion,
+          fecha: formEvento.fecha,
+          hora: formEvento.hora,
+          portada: formEvento.portada,
+          tipo: formEvento.tipo || "publico",
+          creado: firebase.firestore.FieldValue.serverTimestamp(),
         });
         alert("✅ ¡Evento creado con éxito!");
       }
-      
-      setFormEvento({ titulo: '', descripcion: '', fecha: '', hora: '', portada: 'https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80', tipo: 'publico' });
+
+      setFormEvento({
+        titulo: "",
+        descripcion: "",
+        fecha: "",
+        hora: "",
+        portada:
+          "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80",
+        tipo: "publico",
+      });
       setEditandoEventoId(null);
-      navegarA(formEvento.tipo === 'interno' ? 'admin_eventos_internos' : 'admin_eventos');
-    } catch (err) { alert("❌ Error al guardar evento: " + err.message); }
+      navegarA(
+        formEvento.tipo === "interno"
+          ? "admin_eventos_internos"
+          : "admin_eventos",
+      );
+    } catch (err) {
+      alert("❌ Error al guardar evento: " + err.message);
+    }
     setCargando(false);
   };
 
@@ -619,15 +646,27 @@ function App() {
 
           if (colEmp && colNom && fila[colEmp]) {
             const numEmpStr = String(fila[colEmp]).trim();
+            const nombreDocente = fila[colNom];
+            
+            // 1. Guardar en el directorio general de FIME
             const docRef = db.collection("directorio_fime").doc(numEmpStr);
-            batch.set(
-              docRef,
-              { nombreCompleto: fila[colNom], registrado: true },
-              { merge: true },
-            );
+            batch.set(docRef, { nombreCompleto: nombreDocente, registrado: true }, { merge: true });
+
+            // 2. NUEVO: Inscribirlos automáticamente a la lista de este evento
+            if (eventoSeleccionado) {
+              const docIdUnico = `${eventoSeleccionado.id}_${numEmpStr}`;
+              const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
+              batch.set(preAsisRef, {
+                eventoId: eventoSeleccionado.id,
+                numEmpleado: numEmpStr,
+                nombreMaestro: nombreDocente,
+                fechaRegistro: firebase.firestore.FieldValue.serverTimestamp()
+              });
+            }
+            
             agregados++;
           }
-        });
+          });
         await batch.commit();
         alert(`✅ Carga exitosa. Se actualizaron ${agregados} registros.`);
         obtenerMaestros();
@@ -851,14 +890,14 @@ function App() {
               </div>
               <button
                 onClick={() => navegarA("admin_eventos")}
-                className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === 'admin_eventos' || (pantallaActual === 'admin_asistencia_evento' && eventoSeleccionado?.tipo !== 'interno') ? `${themeBg} text-white` : 'hover:bg-white/10 text-white/80'}`}
+                className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === "admin_eventos" || (pantallaActual === "admin_asistencia_evento" && eventoSeleccionado?.tipo !== "interno") ? `${themeBg} text-white` : "hover:bg-white/10 text-white/80"}`}
               >
-                <span>📅  Eventos Públicos</span>
+                <span>📅 Eventos Públicos</span>
               </button>
               {/* NUEVO BOTÓN: EVENTOS INTERNOS */}
               <button
                 onClick={() => navegarA("admin_eventos_internos")}
-                className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === 'admin_eventos_internos' || (pantallaActual === 'admin_asistencia_evento' && eventoSeleccionado?.tipo === 'interno') ? `${themeBg} text-white` : 'hover:bg-white/10 text-white/80'}`}
+                className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === "admin_eventos_internos" || (pantallaActual === "admin_asistencia_evento" && eventoSeleccionado?.tipo === "interno") ? `${themeBg} text-white` : "hover:bg-white/10 text-white/80"}`}
               >
                 <span>📅 Eventos Internos (Admin)</span>
               </button>
@@ -868,8 +907,6 @@ function App() {
               >
                 <span>📋 Lista Maestros Registro</span>
               </button>
-              
-              
             </>
           ) : (
             <>
@@ -930,141 +967,159 @@ function App() {
         </header>
 
         <div className="p-6 md:p-8 flex-1 flex flex-col">
-          {(pantallaActual === 'admin_eventos' || pantallaActual === 'admin_eventos_internos') && esAdmin && (
-            <div>
-              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl md:text-3xl font-bold text-gray-800">{pantallaActual === 'admin_eventos' ? 'Eventos Públicos' : 'Eventos Internos (Administrativos)'}</h2>
-                <button
-                  onClick={() => {
-                    setEditandoEventoId(null);
-                    setFormEvento({
-                      titulo: "",
-                      descripcion: "",
-                      fecha: "",
-                      hora: "",
-                      portada:
-                        "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80",
-                      tipo: pantallaActual === 'admin_eventos' ? 'publico' : 'interno'
-                    });
-                    navegarA("registrar_evento");
-                  }}
-                  className={`${themeBg} text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:opacity-90`}
-                >
-                  ➕ Nuevo Evento
-                </button>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {(pantallaActual === 'admin_eventos' ? listaEventos : listaEventosInternos).map((evento) => (
-                  <div
-                    key={evento.id}
-                    className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100"
+          {(pantallaActual === "admin_eventos" ||
+            pantallaActual === "admin_eventos_internos") &&
+            esAdmin && (
+              <div>
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-2xl md:text-3xl font-bold text-gray-800">
+                    {pantallaActual === "admin_eventos"
+                      ? "Eventos Públicos"
+                      : "Eventos Internos (Administrativos)"}
+                  </h2>
+                  <button
+                    onClick={() => {
+                      setEditandoEventoId(null);
+                      setFormEvento({
+                        titulo: "",
+                        descripcion: "",
+                        fecha: "",
+                        hora: "",
+                        portada:
+                          "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80",
+                        tipo:
+                          pantallaActual === "admin_eventos"
+                            ? "publico"
+                            : "interno",
+                      });
+                      navegarA("registrar_evento");
+                    }}
+                    className={`${themeBg} text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:opacity-90`}
                   >
-                    <div className="h-40 bg-gray-200 relative overflow-hidden">
-                      <img
-                        src={evento.portada}
-                        alt={evento.titulo}
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
-                    <div className="p-5 flex-1 flex flex-col justify-between">
-                      <div>
-                        <h3 className="text-lg font-bold text-gray-800">
-                          {evento.titulo}
-                        </h3>
-                        <p className="text-gray-500 text-xs mt-1">
-                          📅 {evento.fecha} • {evento.hora || "Por definir"}
-                        </p>
-                        <p className="text-gray-600 text-sm mt-2 line-clamp-2">
-                          {evento.descripcion}
-                        </p>
-                      </div>
+                    ➕ Nuevo Evento
+                  </button>
+                </div>
 
-                      <div className="mt-5 pt-3 border-t border-gray-100 flex flex-wrap justify-between items-center gap-2">
-                        <button
-                          onClick={() => abrirAsistenciasAdmin(evento)}
-                          className="text-sky-600 text-sm font-bold hover:underline whitespace-nowrap"
-                        >
-                          Ver Asistencias →
-                        </button>
-                        <div className="flex gap-2">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {(pantallaActual === "admin_eventos"
+                    ? listaEventos
+                    : listaEventosInternos
+                  ).map((evento) => (
+                    <div
+                      key={evento.id}
+                      className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100"
+                    >
+                      <div className="h-40 bg-gray-200 relative overflow-hidden">
+                        <img
+                          src={evento.portada}
+                          alt={evento.titulo}
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                      <div className="p-5 flex-1 flex flex-col justify-between">
+                        <div>
+                          <h3 className="text-lg font-bold text-gray-800">
+                            {evento.titulo}
+                          </h3>
+                          <p className="text-gray-500 text-xs mt-1">
+                            📅 {evento.fecha} • {evento.hora || "Por definir"}
+                          </p>
+                          <p className="text-gray-600 text-sm mt-2 line-clamp-2">
+                            {evento.descripcion}
+                          </p>
+                        </div>
+
+                        <div className="mt-5 pt-3 border-t border-gray-100 flex flex-wrap justify-between items-center gap-2">
                           <button
-                            onClick={() => abrirModalQR(evento)}
-                            className="bg-black hover:bg-gray-800 text-white text-xs font-bold py-1.5 px-3 rounded-lg transition-colors flex items-center gap-1"
+                            onClick={() => abrirAsistenciasAdmin(evento)}
+                            className="text-sky-600 text-sm font-bold hover:underline whitespace-nowrap"
                           >
-                            📱 QR
+                            Ver Asistencias →
                           </button>
-                          <button
-                            onClick={() => prepararEdicionEvento(evento)}
-                            className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold py-1.5 px-3 rounded-lg transition-colors"
-                          >
-                            ✏️ Editar
-                          </button>
+                          <div className="flex gap-2">
+                            <button
+                              onClick={() => abrirModalQR(evento)}
+                              className="bg-black hover:bg-gray-800 text-white text-xs font-bold py-1.5 px-3 rounded-lg transition-colors flex items-center gap-1"
+                            >
+                              📱 QR
+                            </button>
+                            <button
+                              onClick={() => prepararEdicionEvento(evento)}
+                              className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold py-1.5 px-3 rounded-lg transition-colors"
+                            >
+                              ✏️ Editar
+                            </button>
+                          </div>
                         </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
 
-                {listaEventos.length === 0 && (
-                  <div className="col-span-full bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center text-gray-500">
-                    <p className="font-medium text-lg">
-                      No hay eventos registrados en la base de datos.
-                    </p>
+                  {listaEventos.length === 0 && (
+                    <div className="col-span-full bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center text-gray-500">
+                      <p className="font-medium text-lg">
+                        No hay eventos registrados en la base de datos.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {mostrarModalQR && (
+                  <div
+                    className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm"
+                    onClick={() => setMostrarModalQR(false)}
+                  >
+                    <div
+                      className="bg-white rounded-2xl shadow-2xl p-8 text-center max-w-sm w-full"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <h3 className="text-2xl font-extrabold text-gray-800 mb-2">
+                        Acceso Rápido
+                      </h3>
+                      <p className="text-gray-500 text-sm mb-6">
+                        Pide a los maestros escanear este código en la puerta
+                        para confirmar asistencia.
+                      </p>
+
+                      <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 inline-block mb-6 shadow-inner">
+                        <img
+                          src={`https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(linkQRDinamico)}`}
+                          alt="Código QR Asistencia"
+                          className="w-48 h-48 mx-auto"
+                        />
+                      </div>
+
+                      <div className="bg-sky-50 text-sky-800 text-xs p-3 rounded-lg mb-6 break-all font-mono shadow-sm">
+                        {linkQRDinamico}
+                      </div>
+
+                      <button
+                        onClick={() => setMostrarModalQR(false)}
+                        className="w-full bg-gray-800 text-white py-3 rounded-xl font-bold hover:bg-black transition-all shadow-md"
+                      >
+                        Cerrar
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
-
-              {mostrarModalQR && (
-                <div
-                  className="fixed inset-0 bg-black/80 z-50 flex items-center justify-center p-4 backdrop-blur-sm"
-                  onClick={() => setMostrarModalQR(false)}
-                >
-                  <div
-                    className="bg-white rounded-2xl shadow-2xl p-8 text-center max-w-sm w-full"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <h3 className="text-2xl font-extrabold text-gray-800 mb-2">
-                      Acceso Rápido
-                    </h3>
-                    <p className="text-gray-500 text-sm mb-6">
-                      Pide a los maestros escanear este código en la puerta para
-                      confirmar asistencia.
-                    </p>
-
-                    <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 inline-block mb-6 shadow-inner">
-                      <img
-                        src={`https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(linkQRDinamico)}`}
-                        alt="Código QR Asistencia"
-                        className="w-48 h-48 mx-auto"
-                      />
-                    </div>
-
-                    <div className="bg-sky-50 text-sky-800 text-xs p-3 rounded-lg mb-6 break-all font-mono shadow-sm">
-                      {linkQRDinamico}
-                    </div>
-
-                    <button
-                      onClick={() => setMostrarModalQR(false)}
-                      className="w-full bg-gray-800 text-white py-3 rounded-xl font-bold hover:bg-black transition-all shadow-md"
-                    >
-                      Cerrar
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
+            )}
 
           {pantallaActual === "admin_asistencia_evento" && esAdmin && (
             <div className="flex flex-col h-full">
               <div className="flex justify-between items-center mb-6">
                 <div>
                   <button
-                    onClick={() => navegarA("admin_eventos")}
-                    className="text-gray-500 hover:text-gray-800 text-sm font-bold mb-2 flex items-center"
+                    onClick={() =>
+                      navegarA(
+                        eventoSeleccionado?.tipo === "interno"
+                          ? "admin_eventos_internos"
+                          : "admin_eventos",
+                      )
+                    }
+                    className="text-gray-500 hover:text-gray-700 font-medium text-sm transition-colors"
                   >
-                    &larr; Volver a Eventos
+                    ← Regresar
                   </button>
                   <h2 className="text-2xl md:text-3xl font-bold text-gray-800">
                     {eventoSeleccionado?.titulo}
@@ -1118,7 +1173,7 @@ function App() {
                 type="text"
                 value={busquedaAsistencias}
                 onChange={(e) => setBusquedaAsistencias(e.target.value)}
-                placeholder="🔍 Buscar maestro por nombre o número (Ej. Ctrl+F)"
+                placeholder="🔍 Buscar maestro por nombre o número"
                 className="w-full mb-4 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-sky-400 outline-none"
               />
 
@@ -1142,7 +1197,9 @@ function App() {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100">
-                      {maestrosFiltradosAsistencia.map((maestro) => (
+                      {maestrosFiltradosAsistencia
+                        .filter((maestro) => eventoSeleccionado?.tipo === "interno" ? preRegistradosEvento.includes(maestro.id) : true)
+                        .map((maestro) => (
                         <tr
                           key={maestro.id}
                           className="hover:bg-gray-50 transition-colors"
@@ -1240,7 +1297,7 @@ function App() {
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {!modoEdicion &&
-                        maestrosFiltradosGeneral.map((maestro) => (
+                        (eventoSeleccionado?.tipo === 'interno' ? [] : maestrosFiltradosGeneral).map((maestro) => (
                           <tr
                             key={maestro.id}
                             className="hover:bg-gray-50 transition-colors"
