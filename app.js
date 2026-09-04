@@ -106,26 +106,33 @@ function App() {
       return;
     }
 
+    
     // 2. Tiempo real para el ADMIN
     if (
       esAdmin &&
       pantallaActual === "admin_asistencia_evento" &&
       eventoSeleccionado
     ) {
+      // ESCUCHADOR 1: Va a Firebase y trae a los invitados (Pre-asistencias)
       unsubscribePre = db
         .collection("pre_asistencias")
         .where("eventoId", "==", eventoSeleccionado.id)
         .onSnapshot((snapshot) => {
-          const listaPre = snapshot.docs.map((doc) => doc.data().numEmpleado);
+          const listaPre = snapshot.docs.map((doc) => String(doc.data().numEmpleado).trim());
           setPreRegistradosEvento(listaPre);
         });
 
+      // ESCUCHADOR 2: Va a Firebase y trae los días asistidos (El diccionario multidía)
       unsubscribeAsis = db
         .collection("asistencias")
         .where("eventoId", "==", eventoSeleccionado.id)
         .onSnapshot((snapshot) => {
-          const listaAsis = snapshot.docs.map((doc) => doc.data().numEmpleado);
-          setAsistentesFinalesEvento(listaAsis);
+          const diccionarioAsistencias = {};
+          snapshot.docs.forEach((doc) => {
+            const data = doc.data();
+            diccionarioAsistencias[data.numEmpleado] = data.diasAsistidos || [1];
+          });
+          setAsistentesFinalesEvento(diccionarioAsistencias);
         });
     }
 
@@ -137,11 +144,12 @@ function App() {
       numEmpleado
     ) {
       const docIdUnico = `${eventoSeleccionado.id}_${numEmpleado}`;
-      unsubscribeUsuario = db
+      unsubscribePre = db
         .collection("pre_asistencias")
-        .doc(docIdUnico)
-        .onSnapshot((doc) => {
-          setYaRegistrado(doc.exists);
+        .where("eventoId", "==", eventoSeleccionado.id)
+        .onSnapshot((snapshot) => {
+          const listaPre = snapshot.docs.map((doc) => String(doc.data().numEmpleado).trim());
+          setPreRegistradosEvento(listaPre);
         });
     }
 
@@ -337,24 +345,71 @@ function App() {
   const registrarAsistenciaFinal = async () => {
     setCargando(true);
     try {
+      // 1. Buscamos el evento para saber su fecha de inicio y si es multidia
+      let eventoDoc = await db.collection("eventos_fime").doc(qrEventoId).get();
+      if (!eventoDoc.exists) {
+        eventoDoc = await db
+          .collection("eventos_internos_fime")
+          .doc(qrEventoId)
+          .get();
+      }
+
+      if (!eventoDoc.exists) {
+        alert("❌ Evento no encontrado en la base de datos.");
+        setCargando(false);
+        return;
+      }
+
+      const eventoData = eventoDoc.data();
+
+      // 2. Calculamos qué día es HOY respecto al inicio del evento
+      const fechaHoyLocal = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD
+      const diaEscaneado = calcularDiasEvento(
+        eventoData.fecha,
+        fechaHoyLocal,
+        eventoData.esMultiDia,
+      );
+
       const docIdUnico = `${qrEventoId}_${numEmpleado}`;
       const docRef = db.collection("asistencias").doc(docIdUnico);
       const docSnap = await docRef.get();
 
       if (docSnap.exists) {
-        alert(
-          "Ya habías confirmado tu asistencia a este evento anteriormente.",
-        );
+        const dataAnterior = docSnap.data();
+        if (
+          dataAnterior.diasAsistidos &&
+          dataAnterior.diasAsistidos.includes(diaEscaneado)
+        ) {
+          alert(
+            `⚠️ Ya habías confirmado tu asistencia para el DÍA ${diaEscaneado} de este evento.`,
+          );
+        } else {
+          // Si ya existía pero es un día nuevo, le sumamos el día al arreglo
+          await docRef.update({
+            diasAsistidos:
+              firebase.firestore.FieldValue.arrayUnion(diaEscaneado),
+            ultimaFirma: firebase.firestore.FieldValue.serverTimestamp(),
+          });
+          setConfirmacionExitosa(true);
+        }
       } else {
+        // Registro por primera vez (Día 1 u otro)
         await docRef.set({
           eventoId: qrEventoId,
           numEmpleado: numEmpleado,
           nombreMaestro: nombreMaestro,
+          diasAsistidos: [diaEscaneado],
           fechaFirma: firebase.firestore.FieldValue.serverTimestamp(),
         });
-
         setConfirmacionExitosa(true);
+      }
 
+      if (
+        confirmacionExitosa ||
+        !docSnap.exists ||
+        (docSnap.exists &&
+          !docSnap.data().diasAsistidos?.includes(diaEscaneado))
+      ) {
         setTimeout(() => {
           window.history.replaceState(
             {},
@@ -560,17 +615,21 @@ function App() {
   const eliminarEvento = async () => {
     if (!editandoEventoId) return;
     const confirmacion = window.confirm(
-      "⚠️ Avisar a las personas registradas que el evento se eliminará permanentemente ya sea para algún cambio o su eliminación total",
+      "⚠️ ¿Estás seguro de eliminar este evento permanentemente?",
     );
     if (confirmacion) {
       setCargando(true);
       try {
-        await db.collection("eventos_fime").doc(editandoEventoId).delete();
-        alert(
-          "🗑️ El evento ha sido eliminado permanentemente de la base de datos.",
-        );
+        // Detectamos la colección correcta según si es interno o público
+        const coleccionDestino = formEvento.tipo === "interno" ? "eventos_internos_fime" : "eventos_fime";
+        
+        await db.collection(coleccionDestino).doc(editandoEventoId).delete();
+        
+        alert("🗑️ El evento ha sido eliminado permanentemente de la base de datos.");
         setEditandoEventoId(null);
-        navegarA("admin_eventos");
+        
+        // Redirigimos a su pantalla correspondiente
+        navegarA(formEvento.tipo === "interno" ? "admin_eventos_internos" : "admin_eventos");
       } catch (err) {
         alert("❌ Error al eliminar el evento: " + err.message);
       }
@@ -607,12 +666,39 @@ function App() {
   // ==========================================
   const exportarLista = (formato) => {
     if (!eventoSeleccionado) return;
-    const datosExportar = maestrosFiltradosAsistencia.map((m) => ({
-      "NO. EMPLEADO": m.id,
-      "NOMBRE DEL DOCENTE": m.nombreCompleto,
-      "PRE-ASISTENCIA": preRegistradosEvento.includes(m.id) ? "SI" : "NO",
-      "FIRMA (EN SALA)": asistentesFinalesEvento.includes(m.id) ? "SI" : "NO",
-    }));
+
+    const numDias = calcularDiasEvento(
+      eventoSeleccionado.fecha,
+      eventoSeleccionado.fechaFin,
+      eventoSeleccionado.esMultiDia,
+    );
+
+    const maestrosAExportar = maestrosFiltradosAsistencia.filter((maestro) =>
+      eventoSeleccionado.tipo === "interno"
+        ? preRegistradosEvento.includes(maestro.id)
+        : true,
+    );
+
+    const datosExportar = maestrosAExportar.map((m) => {
+      const fila = {
+        "NO. EMPLEADO": m.id,
+        "NOMBRE DEL DOCENTE": m.nombreCompleto,
+      };
+
+      if (eventoSeleccionado.tipo !== "interno") {
+        fila["PRE-ASISTENCIA"] = preRegistradosEvento.includes(m.id)
+          ? "SI"
+          : "NO";
+      }
+
+      // Agregamos una columna por cada día del evento
+      for (let i = 1; i <= numDias; i++) {
+        const asistio = asistentesFinalesEvento[m.id]?.includes(i);
+        fila[`DÍA ${i}`] = asistio ? "SI" : "NO";
+      }
+
+      return fila;
+    });
 
     if (formato === "xlsx") {
       const worksheet = XLSX.utils.json_to_sheet(datosExportar);
@@ -622,21 +708,27 @@ function App() {
     } else if (formato === "pdf") {
       const doc = new window.jspdf.jsPDF();
       doc.text(`Reporte de Asistencias: ${eventoSeleccionado.titulo}`, 14, 15);
+
+      const encabezadosPDF = ["NO. EMPLEADO", "NOMBRE DEL DOCENTE"];
+      if (eventoSeleccionado.tipo !== "interno")
+        encabezadosPDF.push("PRE-ASISTENCIA");
+      for (let i = 1; i <= numDias; i++) encabezadosPDF.push(`DÍA ${i}`);
+
+      const cuerpoPDF = datosExportar.map((d) => {
+        const filaDoc = [d["NO. EMPLEADO"], d["NOMBRE DEL DOCENTE"]];
+        if (eventoSeleccionado.tipo !== "interno")
+          filaDoc.push(d["PRE-ASISTENCIA"]);
+        for (let i = 1; i <= numDias; i++) filaDoc.push(d[`DÍA ${i}`]);
+        return filaDoc;
+      });
+
       doc.autoTable({
-        head: [
-          ["NO. EMPLEADO", "NOMBRE DEL DOCENTE", "PRE-ASISTENCIA", "FIRMA"],
-        ],
-        body: datosExportar.map((d) => [
-          d["NO. EMPLEADO"],
-          d["NOMBRE DEL DOCENTE"],
-          d["PRE-ASISTENCIA"],
-          d["FIRMA (EN SALA)"],
-        ]),
+        head: [encabezadosPDF],
+        body: cuerpoPDF,
         startY: 25,
       });
       doc.save(`Asistencias_${eventoSeleccionado.titulo}.pdf`);
     }
-    setMenuDescargaAbierto(false);
   };
 
   const procesarArchivoLista = (e) => {
@@ -701,13 +793,32 @@ function App() {
             agregados++;
           }
         });
+        // ... (código anterior del batch)
         await batch.commit();
+        
+        // --- NUEVO: ACTUALIZACIÓN OPTIMISTA (Fuerza a la tabla a reaccionar al instante) ---
+        if (eventoSeleccionado) {
+          const numEmpleadosNuevos = [];
+          data.forEach((fila) => {
+            const claves = Object.keys(fila);
+            const colEmp = claves.find((c) => c.toLowerCase().includes("empleado") || c.toLowerCase().includes("matricula"));
+            if (colEmp && fila[colEmp]) {
+              numEmpleadosNuevos.push(String(fila[colEmp]).trim());
+            }
+          });
+          // Le inyectamos los IDs directo a la variable de la tabla
+          setPreRegistradosEvento(prev => [...new Set([...(prev || []), ...numEmpleadosNuevos])]);
+        }
+        // ----------------------------------------------------------------------------------
+
         alert(`✅ Carga exitosa. Se actualizaron ${agregados} registros.`);
         obtenerMaestros();
       } catch (error) {
+
         alert("❌ Error al procesar el archivo Excel.");
       } finally {
         setCargando(false);
+        e.target.value = null;
       }
     };
     reader.readAsBinaryString(file);
@@ -1097,7 +1208,10 @@ function App() {
                     </div>
                   ))}
 
-                  {(pantallaActual === "admin_eventos" ? listaEventos : listaEventosInternos).length === 0 && (
+                  {(pantallaActual === "admin_eventos"
+                    ? listaEventos
+                    : listaEventosInternos
+                  ).length === 0 && (
                     <div className="col-span-full bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center text-gray-500">
                       <p className="font-medium text-lg">
                         No hay eventos registrados en esta sección.
@@ -1241,9 +1355,11 @@ function App() {
                             <th className="p-4 text-sm font-bold text-gray-600">
                               NOMBRE DEL DOCENTE
                             </th>
-                            <th className="p-4 text-sm font-bold text-gray-600 text-center">
-                              PRE-ASISTENCIA
-                            </th>
+                            {eventoSeleccionado?.tipo !== "interno" && (
+                              <th className="p-4 text-sm font-bold text-gray-600 text-center">
+                                PRE-ASISTENCIA
+                              </th>
+                            )}
 
                             {/* DIBUJAMOS LOS ENCABEZADOS DINÁMICAMENTE SEGÚN LOS DÍAS */}
                             {[...Array(numDias)].map((_, index) => (
@@ -1258,10 +1374,11 @@ function App() {
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                           {maestrosFiltradosAsistencia
+                            /* VERSIÓN DE 1 LÍNEA: DIRECTA Y SIN FALLAS */
                             .filter((maestro) =>
                               eventoSeleccionado?.tipo === "interno"
-                                ? preRegistradosEvento.includes(maestro.id)
-                                : true,
+                                ? (preRegistradosEvento || []).some(idPre => String(idPre).trim() === String(maestro.id).trim())
+                                : true
                             )
                             .map((maestro) => (
                               <tr
@@ -1274,26 +1391,28 @@ function App() {
                                 <td className="p-4 text-sm text-gray-800 font-medium">
                                   {maestro.nombreCompleto}
                                 </td>
-                                <td className="p-4 text-center text-xl">
-                                  {preRegistradosEvento.includes(maestro.id)
-                                    ? "✅"
-                                    : "❗"}
-                                </td>
-
-                                {/* DIBUJAMOS LAS CELDAS DE ASISTENCIA DINÁMICAMENTE */}
-                                {[...Array(numDias)].map((_, index) => (
-                                  <td
-                                    key={index}
-                                    className="p-4 text-center text-xl bg-gray-50/30 border-l border-gray-100"
-                                  >
-                                    {/* Placeholder temporal */}
-                                    {asistentesFinalesEvento.includes(
-                                      maestro.id,
-                                    )
-                                      ? "✅"
-                                      : "❗"}
+                                
+                                {/* PRE-ASISTENCIA (Se oculta visualmente si es evento interno) */}
+                                {eventoSeleccionado?.tipo !== "interno" && (
+                                  <td className="p-4 text-center text-xl">
+                                    {preRegistradosEvento.includes(maestro.id) ? "✅" : "❗"}
                                   </td>
-                                ))}
+                                )}
+
+                                {/* DIBUJAMOS LAS CELDAS DE ASISTENCIA MULTIDÍA */}
+                                {[...Array(numDias)].map((_, index) => {
+                                  const diaColumna = index + 1;
+                                  const asistioEseDia = asistentesFinalesEvento[maestro.id]?.includes(diaColumna);
+                                  
+                                  return (
+                                    <td
+                                      key={index}
+                                      className="p-4 text-center text-xl bg-gray-50/30 border-l border-gray-100"
+                                    >
+                                      {asistioEseDia ? "✅" : "❗"}
+                                    </td>
+                                  );
+                                })}
                               </tr>
                             ))}
                         </tbody>
@@ -1373,10 +1492,7 @@ function App() {
                     </thead>
                     <tbody className="divide-y divide-gray-100">
                       {!modoEdicion &&
-                        (eventoSeleccionado?.tipo === "interno"
-                          ? []
-                          : maestrosFiltradosGeneral
-                        ).map((maestro) => (
+                        maestrosFiltradosGeneral.map((maestro) => (
                           <tr
                             key={maestro.id}
                             className="hover:bg-gray-50 transition-colors"
