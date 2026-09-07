@@ -69,10 +69,27 @@ function App() {
     const diferenciaMs = fin - inicio;
     const dias = Math.ceil(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
     return dias > 0 ? dias : 1; // Si por error ponen fecha fin anterior a la de inicio, regresa 1
+  };
 
-   
-  
+  // === NUEVO: CEREBRO DEL TIEMPO (CADUCIDAD Y AUTODESTRUCCIÓN) ===
+  const esEventoCaducado = (evento) => {
+    if (!evento.fecha) return false;
+    const fechaRef =
+      evento.esMultiDia && evento.fechaFin ? evento.fechaFin : evento.fecha;
+    const horaRef = evento.horaFin || evento.hora || "23:59";
+    const limite = new Date(`${fechaRef}T${horaRef}:00`);
+    return new Date() > limite;
+  };
 
+  const diasParaEliminacion = (evento) => {
+    if (!evento.fecha) return 15;
+    const fechaRef =
+      evento.esMultiDia && evento.fechaFin ? evento.fechaFin : evento.fecha;
+    const horaRef = evento.horaFin || evento.hora || "23:59";
+    const limite = new Date(`${fechaRef}T${horaRef}:00`);
+    const diferenciaMs = new Date() - limite;
+    const diasPasados = Math.floor(diferenciaMs / (1000 * 60 * 60 * 24));
+    return Math.max(15 - diasPasados, 0);
   };
 
   // === EFECTOS DE GUARDADO Y CARGA INICIAL ===
@@ -117,7 +134,6 @@ function App() {
       return;
     }
 
-    
     // 2. Tiempo real para el ADMIN
     if (
       esAdmin &&
@@ -129,7 +145,9 @@ function App() {
         .collection("pre_asistencias")
         .where("eventoId", "==", eventoSeleccionado.id)
         .onSnapshot((snapshot) => {
-          const listaPre = snapshot.docs.map((doc) => String(doc.data().numEmpleado).trim());
+          const listaPre = snapshot.docs.map((doc) =>
+            String(doc.data().numEmpleado).trim(),
+          );
           setPreRegistradosEvento(listaPre);
         });
 
@@ -141,10 +159,10 @@ function App() {
           const diccionarioAsistencias = {};
           snapshot.docs.forEach((doc) => {
             const data = doc.data();
-            if(data.numEmpleado) {
+            if (data.numEmpleado) {
               // BLINDAJE AL LEER: Quitamos espacios y forzamos números
               const empId = String(data.numEmpleado).trim();
-              const diasNum = (data.diasAsistidos || [1]).map(d => Number(d));
+              const diasNum = (data.diasAsistidos || [1]).map((d) => Number(d));
               diccionarioAsistencias[empId] = diasNum;
             }
           });
@@ -152,7 +170,6 @@ function App() {
         });
     }
 
-    
     // 3. Tiempo real para el USUARIO
     if (!esAdmin && numEmpleado) {
       // 3.1 Escuchador Global: Descarga todas las invitaciones de este usuario
@@ -171,7 +188,9 @@ function App() {
           .collection("pre_asistencias")
           .where("eventoId", "==", eventoSeleccionado.id)
           .onSnapshot((snapshot) => {
-            const listaPre = snapshot.docs.map((doc) => String(doc.data().numEmpleado).trim());
+            const listaPre = snapshot.docs.map((doc) =>
+              String(doc.data().numEmpleado).trim(),
+            );
             setPreRegistradosEvento(listaPre);
           });
       }
@@ -240,6 +259,41 @@ function App() {
       document.removeEventListener("visibilitychange", checarAlVolver);
     };
   }, [pantallaActual]);
+
+  // === NUEVO: EFECTO DE AUTODESTRUCCIÓN DE EVENTOS (+15 DÍAS) ===
+  useEffect(() => {
+    const limpiarEventosCaducados = async () => {
+      // Juntamos todos los eventos que existen
+      const todosLosEventos = [...listaEventos, ...listaEventosInternos];
+
+      // Filtramos los que ya caducaron y su contador llegó a 0
+      const eventosParaBorrar = todosLosEventos.filter(
+        (ev) => esEventoCaducado(ev) && diasParaEliminacion(ev) === 0,
+      );
+
+      if (eventosParaBorrar.length > 0) {
+        try {
+          const batch = db.batch();
+          eventosParaBorrar.forEach((ev) => {
+            const coleccion =
+              ev.tipo === "interno" ? "eventos_internos_fime" : "eventos_fime";
+            batch.delete(db.collection(coleccion).doc(ev.id));
+          });
+          await batch.commit();
+
+          // Refrescamos las listas silenciosamente
+          obtenerEventos("publico");
+          obtenerEventos("interno");
+        } catch (error) {
+          console.error("Error en autodestrucción:", error);
+        }
+      }
+    };
+
+    if (listaEventos.length > 0 || listaEventosInternos.length > 0) {
+      limpiarEventosCaducados();
+    }
+  }, [listaEventos, listaEventosInternos]);
 
   // ==========================================
   // FUNCIONES DE CARGA Y VALIDACIÓN
@@ -311,12 +365,18 @@ function App() {
 
         if (qrEventoId) {
           // --- EL CADENERO DEL QR ---
-          let eventoDoc = await db.collection("eventos_fime").doc(qrEventoId).get();
+          let eventoDoc = await db
+            .collection("eventos_fime")
+            .doc(qrEventoId)
+            .get();
           let esInterno = false;
-          
+
           // Si no lo encuentra en públicos, busca en internos
           if (!eventoDoc.exists) {
-            eventoDoc = await db.collection("eventos_internos_fime").doc(qrEventoId).get();
+            eventoDoc = await db
+              .collection("eventos_internos_fime")
+              .doc(qrEventoId)
+              .get();
             if (eventoDoc.exists) esInterno = true;
           }
 
@@ -329,23 +389,30 @@ function App() {
           // Si el evento es interno, exige que el usuario esté específicamente en el Excel de invitados
           if (esInterno) {
             const docIdUnico = `${qrEventoId}_${inputLimpio}`;
-            const preSnap = await db.collection("pre_asistencias").doc(docIdUnico).get();
-            
+            const preSnap = await db
+              .collection("pre_asistencias")
+              .doc(docIdUnico)
+              .get();
+
             if (!preSnap.exists) {
-              setError("⚠️ Acceso denegado: No estás en la lista exclusiva de invitados para esta reunión.");
+              setError(
+                "⚠️ Acceso denegado: No estás en la lista exclusiva de invitados para esta reunión.",
+              );
               setCargando(false);
               return;
             }
           }
           // Si es público, pasa directo porque ya validamos que existe en la Lista de Maestros arriba.
           // --------------------------
-          
+
           setPantallaActual("confirmar_asistencia");
         } else {
           setPantallaActual("registro");
         }
       } else {
-        setError("Acceso denegado. Número de empleado no registrado en la Base de Datos de FIME.");
+        setError(
+          "Acceso denegado. Número de empleado no registrado en la Base de Datos de FIME.",
+        );
       }
     } catch (err) {
       console.error("Error al consultar:", err);
@@ -403,7 +470,10 @@ function App() {
       // 1. Buscamos el evento para saber su fecha de inicio y si es multidia
       let eventoDoc = await db.collection("eventos_fime").doc(qrEventoId).get();
       if (!eventoDoc.exists) {
-        eventoDoc = await db.collection("eventos_internos_fime").doc(qrEventoId).get();
+        eventoDoc = await db
+          .collection("eventos_internos_fime")
+          .doc(qrEventoId)
+          .get();
       }
 
       if (!eventoDoc.exists) {
@@ -416,27 +486,37 @@ function App() {
 
       // 2. Calculamos qué día es HOY (Forzamos a que sea NÚMERO)
       const fechaHoyLocal = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD
-      const diaEscaneado = Number(calcularDiasEvento(
-        eventoData.fecha,
-        fechaHoyLocal,
-        eventoData.esMultiDia,
-      ));
+      const diaEscaneado = Number(
+        calcularDiasEvento(
+          eventoData.fecha,
+          fechaHoyLocal,
+          eventoData.esMultiDia,
+        ),
+      );
 
       // BLINDAJE: Limpiamos espacios basura del número de empleado
       const numLimpio = String(numEmpleado).trim();
       const docIdUnico = `${qrEventoId}_${numLimpio}`;
-      
+
       const docRef = db.collection("asistencias").doc(docIdUnico);
       const docSnap = await docRef.get();
 
       if (docSnap.exists) {
         const dataAnterior = docSnap.data();
-        if (dataAnterior.diasAsistidos && dataAnterior.diasAsistidos.map(d => Number(d)).includes(diaEscaneado)) {
-          alert(`⚠️ Ya habías confirmado tu asistencia para el DÍA ${diaEscaneado} de este evento.`);
+        if (
+          dataAnterior.diasAsistidos &&
+          dataAnterior.diasAsistidos
+            .map((d) => Number(d))
+            .includes(diaEscaneado)
+        ) {
+          alert(
+            `⚠️ Ya habías confirmado tu asistencia para el DÍA ${diaEscaneado} de este evento.`,
+          );
         } else {
           // Si ya existía pero es un día nuevo, le sumamos el día al arreglo
           await docRef.update({
-            diasAsistidos: firebase.firestore.FieldValue.arrayUnion(diaEscaneado),
+            diasAsistidos:
+              firebase.firestore.FieldValue.arrayUnion(diaEscaneado),
             ultimaFirma: firebase.firestore.FieldValue.serverTimestamp(),
           });
           setConfirmacionExitosa(true);
@@ -456,10 +536,18 @@ function App() {
       if (
         confirmacionExitosa ||
         !docSnap.exists ||
-        (docSnap.exists && !docSnap.data().diasAsistidos?.map(d => Number(d)).includes(diaEscaneado))
+        (docSnap.exists &&
+          !docSnap
+            .data()
+            .diasAsistidos?.map((d) => Number(d))
+            .includes(diaEscaneado))
       ) {
         setTimeout(() => {
-          window.history.replaceState({}, document.title, window.location.pathname);
+          window.history.replaceState(
+            {},
+            document.title,
+            window.location.pathname,
+          );
           setQrEventoId(null);
           cerrarSesion();
         }, 3500);
@@ -476,6 +564,7 @@ function App() {
   // ==========================================
   const abrirDetalleEventoUsuario = (evento) => {
     setEventoSeleccionado(evento);
+    setYaRegistrado(misInvitaciones.includes(evento.id)); // <-- ESTO REINICIA LA MEMORIA
     navegarA("detalle_evento");
   };
 
@@ -665,15 +754,24 @@ function App() {
       setCargando(true);
       try {
         // Detectamos la colección correcta según si es interno o público
-        const coleccionDestino = formEvento.tipo === "interno" ? "eventos_internos_fime" : "eventos_fime";
-        
+        const coleccionDestino =
+          formEvento.tipo === "interno"
+            ? "eventos_internos_fime"
+            : "eventos_fime";
+
         await db.collection(coleccionDestino).doc(editandoEventoId).delete();
-        
-        alert("🗑️ El evento ha sido eliminado permanentemente de la base de datos.");
+
+        alert(
+          "🗑️ El evento ha sido eliminado permanentemente de la base de datos.",
+        );
         setEditandoEventoId(null);
-        
+
         // Redirigimos a su pantalla correspondiente
-        navegarA(formEvento.tipo === "interno" ? "admin_eventos_internos" : "admin_eventos");
+        navegarA(
+          formEvento.tipo === "interno"
+            ? "admin_eventos_internos"
+            : "admin_eventos",
+        );
       } catch (err) {
         alert("❌ Error al eliminar el evento: " + err.message);
       }
@@ -712,7 +810,7 @@ function App() {
   const exportarDirectorio = () => {
     // 1. Mapeamos la lista general con los encabezados exactos que pide el sistema
     const datosExportar = maestrosFiltradosGeneral.map((m) => ({
-      "TRAYECTORIA": m.trayectoria || "",
+      TRAYECTORIA: m.trayectoria || "",
       "NO. EMPLEADO": m.id,
       "NOMBRE DEL DOCENTE": m.nombreCompleto,
     }));
@@ -723,7 +821,67 @@ function App() {
     XLSX.utils.book_append_sheet(workbook, worksheet, "Directorio_FIME");
     XLSX.writeFile(workbook, `Directorio_General_FIME.xlsx`);
   };
-  
+
+  // === NUEVO: DESCARGAR HISTÓRICO DIRECTO (ADMIN) ===
+  const descargarHistoricoAdmin = async (evento) => {
+    setCargando(true);
+    try {
+      // Traemos pre-asistencias
+      const preSnap = await db
+        .collection("pre_asistencias")
+        .where("eventoId", "==", evento.id)
+        .get();
+      const preIds = preSnap.docs.map((doc) =>
+        String(doc.data().numEmpleado).trim(),
+      );
+
+      // Traemos asistencias finales
+      const asisSnap = await db
+        .collection("asistencias")
+        .where("eventoId", "==", evento.id)
+        .get();
+      const asisDict = {};
+      asisSnap.docs.forEach((doc) => {
+        const data = doc.data();
+        if (data.numEmpleado)
+          asisDict[String(data.numEmpleado).trim()] = (
+            data.diasAsistidos || [1]
+          ).map(Number);
+      });
+
+      const numDias = calcularDiasEvento(
+        evento.fecha,
+        evento.fechaFin,
+        evento.esMultiDia,
+      );
+      const maestrosAExportar = listaDirectorio.filter((m) =>
+        evento.tipo === "interno" ? preIds.includes(m.id) : true,
+      );
+
+      const datosExportar = maestrosAExportar.map((m) => {
+        const fila = {
+          "NO. EMPLEADO": m.id,
+          "NOMBRE DEL DOCENTE": m.nombreCompleto,
+        };
+        if (evento.tipo !== "interno")
+          fila["PRE-ASISTENCIA"] = preIds.includes(m.id) ? "SI" : "NO";
+        for (let i = 1; i <= numDias; i++) {
+          fila[`DÍA ${i}`] = asisDict[m.id]?.includes(i) ? "SI" : "NO";
+        }
+        return fila;
+      });
+
+      const worksheet = XLSX.utils.json_to_sheet(datosExportar);
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Historial");
+      XLSX.writeFile(workbook, `Historial_${evento.titulo}.xlsx`);
+    } catch (err) {
+      console.error(err);
+      alert("❌ Error al descargar el archivo histórico.");
+    }
+    setCargando(false);
+  };
+
   const exportarLista = (formato) => {
     if (!eventoSeleccionado) return;
 
@@ -789,7 +947,7 @@ function App() {
       });
       doc.save(`Asistencias_${eventoSeleccionado.titulo}.pdf`);
     }
-    
+
     // Cierra el menú automáticamente al terminar
     setMenuDescargaAbierto(false);
   };
@@ -798,27 +956,36 @@ function App() {
     const file = e.target.files[0];
     if (!file) return;
     if (file.name.endsWith(".pdf")) {
-      alert("⚠️ Sube un archivo Excel (.xlsx) para garantizar que los números se vinculen correctamente.");
+      alert(
+        "⚠️ Sube un archivo Excel (.xlsx) para garantizar que los números se vinculen correctamente.",
+      );
       return;
     }
-    
+
     setCargando(true);
     const reader = new FileReader();
-    
+
     reader.onload = async (evt) => {
       try {
         const bstr = evt.target.result;
         const wb = XLSX.read(bstr, { type: "binary" });
         const wsname = wb.SheetNames[0];
-        
+
         // LEEMOS COMO MATRIZ (Arreglo de arreglos) PARA NO DEPENDER DE LA FILA 1
-        const filas = XLSX.utils.sheet_to_json(wb.Sheets[wsname], { header: 1 });
+        const filas = XLSX.utils.sheet_to_json(wb.Sheets[wsname], {
+          header: 1,
+        });
         const batch = db.batch();
         let agregados = 0;
         const numEmpleadosNuevos = [];
 
         // Función ninja para limpiar acentos y espacios extra
-        const normalizar = (texto) => String(texto).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+        const normalizar = (texto) =>
+          String(texto)
+            .toLowerCase()
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .trim();
 
         // 1. EL ESCÁNER: Buscamos en las primeras 10 filas dónde están los encabezados
         let idxFilaTitulos = -1;
@@ -828,12 +995,24 @@ function App() {
         for (let i = 0; i < Math.min(10, filas.length); i++) {
           const fila = filas[i];
           if (!fila || fila.length === 0) continue;
-          
+
           // Buscamos algo que suene a empleado o matrícula
-          idxColEmp = fila.findIndex(celda => celda && (normalizar(celda).includes("empleado") || normalizar(celda).includes("matricula") || normalizar(celda).includes("emp")));
+          idxColEmp = fila.findIndex(
+            (celda) =>
+              celda &&
+              (normalizar(celda).includes("empleado") ||
+                normalizar(celda).includes("matricula") ||
+                normalizar(celda).includes("emp")),
+          );
           // Buscamos algo que suene a nombre
-          idxColNom = fila.findIndex(celda => celda && (normalizar(celda).includes("nombre") || normalizar(celda).includes("docente") || normalizar(celda).includes("maestro")));
-          
+          idxColNom = fila.findIndex(
+            (celda) =>
+              celda &&
+              (normalizar(celda).includes("nombre") ||
+                normalizar(celda).includes("docente") ||
+                normalizar(celda).includes("maestro")),
+          );
+
           // Si encontró ambas columnas en esta fila, ¡bingo!
           if (idxColEmp !== -1 && idxColNom !== -1) {
             idxFilaTitulos = i;
@@ -842,7 +1021,9 @@ function App() {
         }
 
         if (idxFilaTitulos === -1) {
-          alert("⚠️ El sistema no pudo encontrar las columnas de 'No. Empleado' y 'Nombre' en tu archivo. Verifica el Excel.");
+          alert(
+            "⚠️ El sistema no pudo encontrar las columnas de 'No. Empleado' y 'Nombre' en tu archivo. Verifica el Excel.",
+          );
           setCargando(false);
           e.target.value = null;
           return;
@@ -855,25 +1036,37 @@ function App() {
           const nombreRaw = fila[idxColNom];
 
           // Verificamos que la celda de empleado tenga datos reales
-          if (numEmpRaw !== undefined && numEmpRaw !== null && String(numEmpRaw).trim() !== "") {
+          if (
+            numEmpRaw !== undefined &&
+            numEmpRaw !== null &&
+            String(numEmpRaw).trim() !== ""
+          ) {
             const numEmpStr = String(numEmpRaw).trim();
-            const nombreDocente = nombreRaw ? String(nombreRaw).trim() : "SIN NOMBRE";
+            const nombreDocente = nombreRaw
+              ? String(nombreRaw).trim()
+              : "SIN NOMBRE";
 
             // Guardamos en directorio general
             const docRef = db.collection("directorio_fime").doc(numEmpStr);
-            batch.set(docRef, { nombreCompleto: nombreDocente, registrado: true }, { merge: true });
+            batch.set(
+              docRef,
+              { nombreCompleto: nombreDocente, registrado: true },
+              { merge: true },
+            );
 
             // Inscribimos al evento interno
             if (eventoSeleccionado) {
               const docIdUnico = `${eventoSeleccionado.id}_${numEmpStr}`;
-              const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
+              const preAsisRef = db
+                .collection("pre_asistencias")
+                .doc(docIdUnico);
               batch.set(preAsisRef, {
                 eventoId: eventoSeleccionado.id,
                 numEmpleado: numEmpStr,
                 nombreMaestro: nombreDocente,
                 fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
               });
-              
+
               numEmpleadosNuevos.push(numEmpStr);
             }
             agregados++;
@@ -881,13 +1074,17 @@ function App() {
         }
 
         await batch.commit();
-        
+
         // Actualizamos la tabla visual al instante
         if (eventoSeleccionado) {
-          setPreRegistradosEvento(prev => [...new Set([...(prev || []), ...numEmpleadosNuevos])]);
+          setPreRegistradosEvento((prev) => [
+            ...new Set([...(prev || []), ...numEmpleadosNuevos]),
+          ]);
         }
 
-        alert(`✅ Carga exitosa. Se detectaron y registraron ${agregados} maestros.`);
+        alert(
+          `✅ Carga exitosa. Se detectaron y registraron ${agregados} maestros.`,
+        );
         obtenerMaestros();
       } catch (error) {
         console.error(error);
@@ -897,13 +1094,13 @@ function App() {
         e.target.value = null;
       }
     };
-    
+
     reader.readAsBinaryString(file);
   };
-  
+
   const eliminarExcelCargado = async () => {
     const confirmacion = window.confirm(
-      "⚠️ ¿Estás seguro de eliminar a todos los invitados de este evento? Esta acción vaciará la lista permanentemente."
+      "⚠️ ¿Estás seguro de eliminar a todos los invitados de este evento? Esta acción vaciará la lista permanentemente.",
     );
     if (!confirmacion) return;
 
@@ -913,7 +1110,7 @@ function App() {
         .collection("pre_asistencias")
         .where("eventoId", "==", eventoSeleccionado.id)
         .get();
-      
+
       if (!snapshotPre.empty) {
         const batch = db.batch();
         snapshotPre.docs.forEach((doc) => {
@@ -921,7 +1118,7 @@ function App() {
         });
         await batch.commit();
       }
-      
+
       // Vaciamos la memoria visual al instante
       setPreRegistradosEvento([]);
       alert("🗑️ Lista de invitados eliminada correctamente.");
@@ -1143,16 +1340,22 @@ function App() {
               </div>
               <button
                 onClick={() => navegarA("admin_eventos")}
-                className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === "admin_eventos" || (pantallaActual === "admin_asistencia_evento" && eventoSeleccionado?.tipo !== "interno") ? `${themeBg} text-white` : "hover:bg-white/10 text-white/80"}`}
+                className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === "admin_eventos" || (pantallaActual === "admin_asistencia_evento" && eventoSeleccionado?.tipo !== "interno" && !esEventoCaducado(eventoSeleccionado)) ? `${themeBg} text-white` : "hover:bg-white/10 text-white/80"}`}
               >
                 <span>📅 Eventos Públicos</span>
               </button>
               {/* NUEVO BOTÓN: EVENTOS INTERNOS */}
               <button
                 onClick={() => navegarA("admin_eventos_internos")}
-                className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === "admin_eventos_internos" || (pantallaActual === "admin_asistencia_evento" && eventoSeleccionado?.tipo === "interno") ? `${themeBg} text-white` : "hover:bg-white/10 text-white/80"}`}
+                className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === "admin_eventos_internos" || (pantallaActual === "admin_asistencia_evento" && eventoSeleccionado?.tipo === "interno" && !esEventoCaducado(eventoSeleccionado)) ? `${themeBg} text-white` : "hover:bg-white/10 text-white/80"}`}
               >
                 <span>📅 Eventos Internos (Admin)</span>
+              </button>
+              <button
+                onClick={() => navegarA("eventos_recientes")}
+                className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === "eventos_recientes" || (pantallaActual === "admin_asistencia_evento" && esEventoCaducado(eventoSeleccionado)) ? `${themeBg} text-white` : "hover:bg-white/10 text-white/80"}`}
+              >
+                <span>🕒 Historial / Recientes</span>
               </button>
               <button
                 onClick={() => navegarA("admin_maestros")}
@@ -1174,6 +1377,12 @@ function App() {
                 className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === "mis_eventos" ? `${themeBg} text-white` : "hover:bg-white/10 text-white/80"}`}
               >
                 <span>🎟 Mis Registros</span>
+              </button>
+              <button
+                onClick={() => navegarA("eventos_recientes")}
+                className={`w-full text-left px-4 py-3 rounded-lg transition-colors font-medium flex items-center space-x-3 ${pantallaActual === "eventos_recientes" ? `${themeBg} text-white` : "hover:bg-white/10 text-white/80"}`}
+              >
+                <span>🕒 Eventos Terminados</span>
               </button>
             </>
           )}
@@ -1260,61 +1469,63 @@ function App() {
                   {(pantallaActual === "admin_eventos"
                     ? listaEventos
                     : listaEventosInternos
-                  ).map((evento) => (
-                    <div
-                      key={evento.id}
-                      className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100"
-                    >
-                      <div className="h-40 bg-gray-200 relative overflow-hidden">
-                        <img
-                          src={evento.portada}
-                          alt={evento.titulo}
-                          className="w-full h-full object-cover"
-                        />
-                      </div>
-                      <div className="p-5 flex-1 flex flex-col justify-between">
-                        <div>
-                          <h3 className="text-lg font-bold text-gray-800">
-                            {evento.titulo}
-                          </h3>
-                          <p className="text-gray-500 text-xs mt-1">
-                            📅 {evento.fecha}{" "}
-                            {evento.esMultiDia && evento.fechaFin
-                              ? `al ${evento.fechaFin}`
-                              : ""}{" "}
-                            • {evento.hora || "Por definir"}{" "}
-                            {evento.horaFin ? `- ${evento.horaFin}` : ""}
-                          </p>
-                          <p className="text-gray-600 text-sm mt-2 line-clamp-2">
-                            {evento.descripcion}
-                          </p>
+                  )
+                    .filter((evento) => !esEventoCaducado(evento))
+                    .map((evento) => (
+                      <div
+                        key={evento.id}
+                        className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100"
+                      >
+                        <div className="h-40 bg-gray-200 relative overflow-hidden">
+                          <img
+                            src={evento.portada}
+                            alt={evento.titulo}
+                            className="w-full h-full object-cover"
+                          />
                         </div>
+                        <div className="p-5 flex-1 flex flex-col justify-between">
+                          <div>
+                            <h3 className="text-lg font-bold text-gray-800">
+                              {evento.titulo}
+                            </h3>
+                            <p className="text-gray-500 text-xs mt-1">
+                              📅 {evento.fecha}{" "}
+                              {evento.esMultiDia && evento.fechaFin
+                                ? `al ${evento.fechaFin}`
+                                : ""}{" "}
+                              • {evento.hora || "Por definir"}{" "}
+                              {evento.horaFin ? `- ${evento.horaFin}` : ""}
+                            </p>
+                            <p className="text-gray-600 text-sm mt-2 line-clamp-2">
+                              {evento.descripcion}
+                            </p>
+                          </div>
 
-                        <div className="mt-5 pt-3 border-t border-gray-100 flex flex-wrap justify-between items-center gap-2">
-                          <button
-                            onClick={() => abrirAsistenciasAdmin(evento)}
-                            className="text-sky-600 text-sm font-bold hover:underline whitespace-nowrap"
-                          >
-                            Ver Asistencias →
-                          </button>
-                          <div className="flex gap-2">
+                          <div className="mt-5 pt-3 border-t border-gray-100 flex flex-wrap justify-between items-center gap-2">
                             <button
-                              onClick={() => abrirModalQR(evento)}
-                              className="bg-black hover:bg-gray-800 text-white text-xs font-bold py-1.5 px-3 rounded-lg transition-colors flex items-center gap-1"
+                              onClick={() => abrirAsistenciasAdmin(evento)}
+                              className="text-sky-600 text-sm font-bold hover:underline whitespace-nowrap"
                             >
-                              📱 QR
+                              Ver Asistencias →
                             </button>
-                            <button
-                              onClick={() => prepararEdicionEvento(evento)}
-                              className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold py-1.5 px-3 rounded-lg transition-colors"
-                            >
-                              ✏️ Editar
-                            </button>
+                            <div className="flex gap-2">
+                              <button
+                                onClick={() => abrirModalQR(evento)}
+                                className="bg-black hover:bg-gray-800 text-white text-xs font-bold py-1.5 px-3 rounded-lg transition-colors flex items-center gap-1"
+                              >
+                                📱 QR
+                              </button>
+                              <button
+                                onClick={() => prepararEdicionEvento(evento)}
+                                className="bg-gray-100 hover:bg-gray-200 text-gray-700 text-xs font-bold py-1.5 px-3 rounded-lg transition-colors"
+                              >
+                                ✏️ Editar
+                              </button>
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    ))}
 
                   {(pantallaActual === "admin_eventos"
                     ? listaEventos
@@ -1376,9 +1587,11 @@ function App() {
                   <button
                     onClick={() =>
                       navegarA(
-                        eventoSeleccionado?.tipo === "interno"
-                          ? "admin_eventos_internos"
-                          : "admin_eventos",
+                        esEventoCaducado(eventoSeleccionado)
+                          ? "eventos_recientes"
+                          : eventoSeleccionado?.tipo === "interno"
+                            ? "admin_eventos_internos"
+                            : "admin_eventos",
                       )
                     }
                     className="text-gray-500 hover:text-gray-700 font-medium text-sm transition-colors"
@@ -1391,8 +1604,9 @@ function App() {
                 </div>
                 <div className="flex gap-2 relative">
                   {/* CONDICIÓN: SUBIR EXCEL VS ELIMINAR EXCEL */}
-                  {eventoSeleccionado?.tipo === "interno" && (
-                    (!preRegistradosEvento || preRegistradosEvento.length === 0) ? (
+                  {eventoSeleccionado?.tipo === "interno" &&
+                    (!preRegistradosEvento ||
+                    preRegistradosEvento.length === 0 ? (
                       <label className="bg-green-100 text-green-700 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold cursor-pointer flex items-center shadow-sm transition-colors">
                         📂 Subir Excel
                         <input
@@ -1410,8 +1624,7 @@ function App() {
                       >
                         🗑️ Eliminar Excel
                       </button>
-                    )
-                  )}
+                    ))}
 
                   <div className="relative">
                     <button
@@ -1495,8 +1708,12 @@ function App() {
                             /* VERSIÓN DE 1 LÍNEA: DIRECTA Y SIN FALLAS */
                             .filter((maestro) =>
                               eventoSeleccionado?.tipo === "interno"
-                                ? (preRegistradosEvento || []).some(idPre => String(idPre).trim() === String(maestro.id).trim())
-                                : true
+                                ? (preRegistradosEvento || []).some(
+                                    (idPre) =>
+                                      String(idPre).trim() ===
+                                      String(maestro.id).trim(),
+                                  )
+                                : true,
                             )
                             .map((maestro) => (
                               <tr
@@ -1509,12 +1726,16 @@ function App() {
                                 <td className="p-4 text-sm text-gray-800 font-medium">
                                   {maestro.nombreCompleto}
                                 </td>
-                                
+
                                 {/* PRE-ASISTENCIA (Se oculta visualmente si es evento interno) */}
                                 {eventoSeleccionado?.tipo !== "interno" && (
                                   <td className="p-4 text-center text-xl">
                                     {/* BLINDAJE: Limpiamos el ID también aquí */}
-                                    {preRegistradosEvento.includes(String(maestro.id).trim()) ? "✅" : "❗"}
+                                    {preRegistradosEvento.includes(
+                                      String(maestro.id).trim(),
+                                    )
+                                      ? "✅"
+                                      : "❗"}
                                   </td>
                                 )}
 
@@ -1523,8 +1744,11 @@ function App() {
                                   const diaColumna = index + 1;
                                   // BLINDAJE: Búsqueda cruzada exacta
                                   const idLimpio = String(maestro.id).trim();
-                                  const asistioEseDia = asistentesFinalesEvento[idLimpio]?.includes(diaColumna);
-                                  
+                                  const asistioEseDia =
+                                    asistentesFinalesEvento[idLimpio]?.includes(
+                                      diaColumna,
+                                    );
+
                                   return (
                                     <td
                                       key={index}
@@ -1641,11 +1865,19 @@ function App() {
                         cambiosDirectorio.map((maestro, index) => {
                           // 1. Verificamos si el maestro coincide con lo escrito en la barra
                           const textoBusqueda = busquedaMaestros.toLowerCase();
-                          const nombre = maestro.nombreCompleto ? maestro.nombreCompleto.toLowerCase() : "";
-                          const idMaestro = maestro.id ? String(maestro.id).toLowerCase() : "";
-                          
+                          const nombre = maestro.nombreCompleto
+                            ? maestro.nombreCompleto.toLowerCase()
+                            : "";
+                          const idMaestro = maestro.id
+                            ? String(maestro.id).toLowerCase()
+                            : "";
+
                           // 2. Si hay búsqueda y no hay coincidencia, ocultamos la fila (return null)
-                          if (busquedaMaestros && !nombre.includes(textoBusqueda) && !idMaestro.includes(textoBusqueda)) {
+                          if (
+                            busquedaMaestros &&
+                            !nombre.includes(textoBusqueda) &&
+                            !idMaestro.includes(textoBusqueda)
+                          ) {
                             return null;
                           }
 
@@ -1653,57 +1885,61 @@ function App() {
                           return (
                             <tr key={index} className="bg-sky-50/30">
                               <td className="p-2">
-                              <input
-                                type="text"
-                                value={maestro.trayectoria}
-                                onChange={(e) =>
-                                  handleCambioInput(
-                                    index,
-                                    "trayectoria",
-                                    e.target.value,
-                                  )
-                                }
-                                className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm"
-                                placeholder="Ej. 10 años"
-                              />
-                            </td>
-                            <td className="p-2">
-                              <input
-                                type="text"
-                                value={maestro.id}
-                                onChange={(e) =>
-                                  handleCambioInput(index, "id", e.target.value)
-                                }
-                                className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm font-semibold"
-                                placeholder="No. Empleado"
-                              />
-                            </td>
-                            <td className="p-2">
-                              <input
-                                type="text"
-                                value={maestro.nombreCompleto}
-                                onChange={(e) =>
-                                  handleCambioInput(
-                                    index,
-                                    "nombreCompleto",
-                                    e.target.value,
-                                  )
-                                }
-                                className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm"
-                                placeholder="Nombre completo"
-                              />
-                            </td>
-                            <td className="p-2 text-center">
-                              <button
-                                onClick={() => eliminarFila(index)}
-                                className="text-red-500 hover:text-red-700 p-2 bg-red-50 rounded-lg"
-                              >
-                                🗑️
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
+                                <input
+                                  type="text"
+                                  value={maestro.trayectoria}
+                                  onChange={(e) =>
+                                    handleCambioInput(
+                                      index,
+                                      "trayectoria",
+                                      e.target.value,
+                                    )
+                                  }
+                                  className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm"
+                                  placeholder="Ej. 10 años"
+                                />
+                              </td>
+                              <td className="p-2">
+                                <input
+                                  type="text"
+                                  value={maestro.id}
+                                  onChange={(e) =>
+                                    handleCambioInput(
+                                      index,
+                                      "id",
+                                      e.target.value,
+                                    )
+                                  }
+                                  className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm font-semibold"
+                                  placeholder="No. Empleado"
+                                />
+                              </td>
+                              <td className="p-2">
+                                <input
+                                  type="text"
+                                  value={maestro.nombreCompleto}
+                                  onChange={(e) =>
+                                    handleCambioInput(
+                                      index,
+                                      "nombreCompleto",
+                                      e.target.value,
+                                    )
+                                  }
+                                  className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm"
+                                  placeholder="Nombre completo"
+                                />
+                              </td>
+                              <td className="p-2 text-center">
+                                <button
+                                  onClick={() => eliminarFila(index)}
+                                  className="text-red-500 hover:text-red-700 p-2 bg-red-50 rounded-lg"
+                                >
+                                  🗑️
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
                     </tbody>
                   </table>
                 </div>
@@ -1728,7 +1964,13 @@ function App() {
                   {editandoEventoId ? "Editar Evento" : "Crear Nuevo Evento"}
                 </h2>
                 <button
-                  onClick={() => navegarA(formEvento.tipo === "interno" ? "admin_eventos_internos" : "admin_eventos")}
+                  onClick={() =>
+                    navegarA(
+                      formEvento.tipo === "interno"
+                        ? "admin_eventos_internos"
+                        : "admin_eventos",
+                    )
+                  }
                   className="text-gray-500 hover:text-gray-800 text-sm font-bold"
                 >
                   &larr; Cancelar
@@ -1970,11 +2212,12 @@ function App() {
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {/* Juntamos ambas listas en una sola antes de filtrarlas */}
                 {[...listaEventos, ...listaEventosInternos]
+                  .filter((evento) => !esEventoCaducado(evento))
                   /* --- EL CANDADO MÁGICO DE SEGURIDAD --- */
                   .filter((evento) => {
                     // 1. Si el evento es público, pasa directo sin pedir credencial
                     if (evento.tipo !== "interno") return true;
-                    
+
                     // 2. Si es interno, revisamos si el ID del evento está en su cartera de invitaciones
                     return misInvitaciones.includes(evento.id);
                   })
@@ -1984,66 +2227,252 @@ function App() {
                       key={evento.id}
                       className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100 transition-transform hover:-translate-y-1"
                     >
-                    <div className="h-40 bg-gray-200 relative overflow-hidden">
-                      <img
-                        src={evento.portada}
-                        alt={evento.titulo}
-                        className="w-full h-full object-cover"
-                      />
-                    </div>
-                    <div className="p-5 flex-1 flex flex-col justify-between">
-                      <div>
-                        <h3 className="text-lg font-bold text-gray-800">
-                          {evento.titulo}
-                        </h3>
-                        <p className="text-gray-500 text-xs mt-1">
-                          📅 {evento.fecha}{" "}
-                          {evento.esMultiDia && evento.fechaFin
-                            ? `al ${evento.fechaFin}`
-                            : ""}{" "}
-                          • {evento.hora || "Por definir"}{" "}
-                          {evento.horaFin ? `- ${evento.horaFin}` : ""}
-                        </p>
-                        <p className="text-gray-600 text-sm mt-2 line-clamp-2">
-                          {evento.descripcion}
-                        </p>
+                      <div className="h-40 bg-gray-200 relative overflow-hidden">
+                        <img
+                          src={evento.portada}
+                          alt={evento.titulo}
+                          className="w-full h-full object-cover"
+                        />
                       </div>
-                      <div className="mt-5 pt-3 border-t border-gray-100">
-                        <button
-                          onClick={() => abrirDetalleEventoUsuario(evento)}
-                          className="w-full bg-fime-main text-white py-2.5 rounded-lg font-bold hover:bg-fime-dark transition-all text-sm flex justify-center items-center gap-2"
-                        >
-                          👁️ Ver Detalles
-                        </button>
+                      <div className="p-5 flex-1 flex flex-col justify-between">
+                        <div>
+                          <h3 className="text-lg font-bold text-gray-800">
+                            {evento.titulo}
+                          </h3>
+                          <p className="text-gray-500 text-xs mt-1">
+                            📅 {evento.fecha}{" "}
+                            {evento.esMultiDia && evento.fechaFin
+                              ? `al ${evento.fechaFin}`
+                              : ""}{" "}
+                            • {evento.hora || "Por definir"}{" "}
+                            {evento.horaFin ? `- ${evento.horaFin}` : ""}
+                          </p>
+                          <p className="text-gray-600 text-sm mt-2 line-clamp-2">
+                            {evento.descripcion}
+                          </p>
+                        </div>
+                        <div className="mt-5 pt-3 border-t border-gray-100">
+                          <button
+                            onClick={() => abrirDetalleEventoUsuario(evento)}
+                            className="w-full bg-fime-main text-white py-2.5 rounded-lg font-bold hover:bg-fime-dark transition-all text-sm flex justify-center items-center gap-2"
+                          >
+                            👁️ Ver Detalles
+                          </button>
+                        </div>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))}
               </div>
             </div>
           )}
 
-          {!esAdmin &&
-            pantallaActual === "detalle_evento" &&
-            eventoSeleccionado && (
-              <div className="max-w-3xl mx-auto w-full relative">
-                <button
-                  onClick={() => navegarA("eventos")}
-                  className="text-gray-500 hover:text-gray-800 text-sm font-bold mb-4 flex items-center transition-colors"
-                >
-                  &larr; Regresar a Eventos
-                </button>
-                <div className="flex flex-col sm:flex-row gap-4 border-t border-gray-100 pt-6">
-                      <button
-                        onClick={() => navegarA("eventos")}
-                        className="flex-1 bg-gray-100 text-gray-700 py-3 px-4 rounded-lg font-bold hover:bg-gray-200 transition-all flex justify-center items-center"
+          {!esAdmin && pantallaActual === "mis_eventos" && (
+            <div>
+              <div className="mb-6">
+                <h2 className="text-2xl md:text-3xl font-bold text-gray-800">
+                  Mis Registros
+                </h2>
+                <p className="text-gray-500 text-sm mt-1">
+                  Tu agenda personal. Eventos a los que estás pre-registrado o
+                  invitado oficialmente.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {[...listaEventos, ...listaEventosInternos]
+                  /* MAGIA: Solo eventos vigentes donde su ID esté en tu cartera */
+                  .filter(
+                    (evento) =>
+                      misInvitaciones.includes(evento.id) &&
+                      !esEventoCaducado(evento),
+                  )
+                  .map((evento) => (
+                    <div
+                      key={evento.id}
+                      className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100 transition-transform hover:-translate-y-1"
+                    >
+                      <div className="h-40 bg-gray-200 relative overflow-hidden">
+                        <img
+                          src={evento.portada}
+                          alt={evento.titulo}
+                          className="w-full h-full object-cover"
+                        />
+                      </div>
+                      <div className="p-5 flex-1 flex flex-col justify-between">
+                        <div>
+                          <h3 className="text-lg font-bold text-gray-800">
+                            {evento.titulo}
+                          </h3>
+                          <p className="text-gray-500 text-xs mt-1">
+                            📅 {evento.fecha} • {evento.hora || "Por definir"}
+                          </p>
+                        </div>
+                        <div className="mt-5 pt-3 border-t border-gray-100">
+                          <button
+                            onClick={() => abrirDetalleEventoUsuario(evento)}
+                            className="w-full bg-sky-600 text-white py-2.5 rounded-lg font-bold hover:bg-sky-700 transition-all text-sm flex justify-center items-center gap-2"
+                          >
+                            👁️ Ver Detalles
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {pantallaActual === "eventos_recientes" && (
+            <div>
+              <div className="mb-6 bg-red-50 border border-red-200 p-4 rounded-xl shadow-sm">
+                <h2 className="text-red-700 font-bold text-lg mb-1 flex items-center gap-2">
+                  ⚠️ Limpieza Automática
+                </h2>
+                <p className="text-red-600 text-sm font-medium">
+                  Estos eventos han finalizado. Se borrarán de forma permanente
+                  y automática de la base de datos dentro de 15 días a partir de
+                  su cierre.
+                </p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {[...listaEventos, ...listaEventosInternos]
+                  .filter((ev) => esEventoCaducado(ev))
+                  // Mortales solo ven los públicos caducados o internos a los que sí fueron invitados
+                  .filter(
+                    (ev) =>
+                      esAdmin ||
+                      ev.tipo !== "interno" ||
+                      misInvitaciones.includes(ev.id),
+                  )
+                  .map((evento) => {
+                    const diasRestantes = diasParaEliminacion(evento);
+                    return (
+                      <div
+                        key={evento.id}
+                        className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100 opacity-90 hover:opacity-100 transition-opacity"
                       >
-                        Regresar
-                      </button>
-                      
-                      {/* MAGIA VISUAL: Si es interno muestra letrero, si es público muestra botón */}
-                      {eventoSeleccionado.tipo === "interno" ? (
-                        <div className="flex-[2] bg-gradient-to-r from-amber-50 to-orange-50 p-4 rounded-xl border border-amber-200 text-center flex flex-col justify-center shadow-inner">
+                        <div className="bg-red-600 text-white text-xs font-bold text-center py-2 shadow-inner tracking-wide">
+                          🔴 TERMINÓ EL{" "}
+                          {evento.esMultiDia && evento.fechaFin
+                            ? evento.fechaFin.toUpperCase()
+                            : evento.fecha.toUpperCase()}
+                        </div>
+                        <div className="h-40 bg-gray-200 relative overflow-hidden grayscale-[30%]">
+                          <img
+                            src={evento.portada}
+                            alt={evento.titulo}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                        <div className="p-5 flex-1 flex flex-col justify-between">
+                          <div>
+                            <h3 className="text-lg font-bold text-gray-800">
+                              {evento.titulo}
+                            </h3>
+                            <p className="text-gray-500 text-xs mt-1">
+                              📅 {evento.fecha} • {evento.hora || "Por definir"}
+                            </p>
+                            <p className="text-gray-600 text-sm mt-2 line-clamp-2">
+                              {evento.descripcion}
+                            </p>
+                          </div>
+                          <div className="mt-4 pt-3 border-t border-gray-100">
+                            <p className="text-center text-red-500 text-xs font-bold mb-3 animate-pulse">
+                              ⏳ Se elimina en {diasRestantes} día
+                              {diasRestantes !== 1 ? "s" : ""}
+                            </p>
+                            <button
+                              onClick={() => {
+                                setEventoSeleccionado(evento);
+                                navegarA("detalle_evento");
+                              }}
+                              className="w-full bg-gray-800 text-white py-2.5 rounded-lg font-bold hover:bg-black transition-all text-sm flex justify-center items-center gap-2"
+                            >
+                              👁️ Ver Archivo Histórico
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            </div>
+          )}
+
+          {pantallaActual === "detalle_evento" && eventoSeleccionado && (
+            <div className="max-w-3xl mx-auto w-full relative">
+              <button
+                onClick={() =>
+                  navegarA(
+                    esEventoCaducado(eventoSeleccionado)
+                      ? "eventos_recientes"
+                      : esAdmin
+                        ? "admin_eventos"
+                        : "eventos",
+                  )
+                }
+                className="text-gray-500 hover:text-gray-800 text-sm font-bold mb-4 flex items-center transition-colors"
+              >
+                &larr; Regresar
+              </button>
+              <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-100">
+                <div className="h-64 bg-gray-200 relative overflow-hidden">
+                  <img
+                    src={eventoSeleccionado.portada}
+                    alt={eventoSeleccionado.titulo}
+                    className="w-full h-full object-cover"
+                  />
+                </div>
+                <div className="p-6 md:p-8">
+                  <h2 className="text-2xl md:text-3xl font-bold text-gray-800 mb-2">
+                    {eventoSeleccionado.titulo}
+                  </h2>
+                  <div className="flex items-center space-x-4 text-sm text-gray-500 mb-6 font-medium">
+                    <span className="flex items-center bg-gray-50 px-3 py-1 rounded-full border border-gray-100">
+                      📅 {eventoSeleccionado.fecha}
+                    </span>
+                    <span className="flex items-center bg-gray-50 px-3 py-1 rounded-full border border-gray-100">
+                      ⏰ {eventoSeleccionado.hora || "Por definir"}
+                    </span>
+                  </div>
+                  <div className="text-gray-600 mb-8 whitespace-pre-wrap leading-relaxed">
+                    {eventoSeleccionado.descripcion ||
+                      "Sin descripción detallada."}
+                  </div>
+
+                  {/* === LÓGICA MÁGICA DE BOTONES (HISTÓRICO VS ACTIVO) === */}
+                  <div className="flex flex-col sm:flex-row gap-4 border-t border-gray-100 pt-6">
+                    {esEventoCaducado(eventoSeleccionado) ? (
+                      // MODO HISTÓRICO (EL EVENTO YA PASÓ)
+                      esAdmin ? (
+                        <>
+                          <button
+                            onClick={() =>
+                              abrirAsistenciasAdmin(eventoSeleccionado)
+                            }
+                            className="flex-1 bg-sky-600 text-white py-3 px-4 rounded-lg font-bold hover:bg-sky-700 transition-all flex justify-center items-center gap-2"
+                          >
+                            👁️ Ver Lista de Maestros
+                          </button>
+                          <button
+                            onClick={() =>
+                              descargarHistoricoAdmin(eventoSeleccionado)
+                            }
+                            disabled={cargando}
+                            className="flex-1 bg-green-600 text-white py-3 px-4 rounded-lg font-bold hover:bg-green-700 transition-all flex justify-center items-center gap-2"
+                          >
+                            {cargando ? "Descargando..." : "📥 Descargar Excel"}
+                          </button>
+                        </>
+                      ) : (
+                        <div className="w-full bg-gray-100 text-gray-500 py-3 rounded-lg font-bold flex justify-center items-center cursor-not-allowed text-center">
+                          🔒 Archivo Histórico: Este evento ha finalizado
+                        </div>
+                      )
+                    ) : (
+                      // MODO ACTIVO (SOLO MORTALES LLEGAN AQUÍ)
+                      !esAdmin &&
+                      (eventoSeleccionado.tipo === "interno" ? (
+                        <div className="w-full bg-gradient-to-r from-amber-50 to-orange-50 p-4 rounded-xl border border-amber-200 text-center flex flex-col justify-center shadow-inner">
                           <span className="font-semibold text-gray-700 text-sm mb-1">
                             Ya estás invitado al evento.
                           </span>
@@ -2055,7 +2484,7 @@ function App() {
                         <button
                           onClick={registrarPreAsistencia}
                           disabled={cargando || yaRegistrado}
-                          className={`flex-1 text-white py-3 px-4 rounded-lg font-bold transition-all flex justify-center items-center gap-2 ${yaRegistrado ? "bg-gray-400 cursor-not-allowed" : "bg-green-600 hover:bg-green-700 shadow-md hover:shadow-lg"}`}
+                          className={`w-full text-white py-3 px-4 rounded-lg font-bold transition-all flex justify-center items-center gap-2 ${yaRegistrado ? "bg-gray-400 cursor-not-allowed" : "bg-green-600 hover:bg-green-700 shadow-md hover:shadow-lg"}`}
                         >
                           {cargando
                             ? "Procesando..."
@@ -2063,51 +2492,41 @@ function App() {
                               ? "✅ Ya estás registrado"
                               : "✅ Pre-asistencia"}
                         </button>
-                      )}
-                    </div>
-
-                {/* MODAL DE ÉXITO ACTUALIZADO */}
-                {mostrarPopup && (
-                  <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-                    <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center transform transition-all animate-bounce-short">
-                      <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner border-4 border-white">
-                        <span className="text-4xl">🎉</span>
-                      </div>
-                      <h3 className="text-2xl font-extrabold text-gray-800 mb-2">
-                        ¡Pre-asistencia enviada!
-                      </h3>
-                      <p className="text-gray-600 mb-6 font-medium leading-relaxed">
-                        Tu registro para{" "}
-                        <strong className="text-gray-800">
-                          {eventoSeleccionado.titulo}
-                        </strong>{" "}
-                        ha sido confirmado exitosamente.
-                      </p>
-
-                      {/* AQUÍ LA MAGIA DEL BOTÓN PARA REGRESAR AL INICIO */}
-                      <button
-                        onClick={() => {
-                          setMostrarPopup(false);
-                          navegarA("eventos");
-                        }}
-                        className="w-full bg-green-600 text-white py-3 rounded-xl font-bold hover:bg-green-700 transition-all shadow-md hover:shadow-lg"
-                      >
-                        Entendido
-                      </button>
-                    </div>
+                      ))
+                    )}
                   </div>
-                )}
+                </div>
               </div>
-            )}
 
-          {!esAdmin && pantallaActual === "mis_eventos" && (
-            <div>
-              <h2 className="text-2xl font-bold text-gray-800">
-                Mis Registros
-              </h2>
-              <p className="text-gray-500 mt-2">
-                Aquí verás tu historial de asistencias (Próximamente).
-              </p>
+              {/* MODAL DE ÉXITO DE PRE-ASISTENCIA */}
+              {mostrarPopup && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+                  <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center transform transition-all animate-bounce-short">
+                    <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-5 shadow-inner border-4 border-white">
+                      <span className="text-4xl">🎉</span>
+                    </div>
+                    <h3 className="text-2xl font-extrabold text-gray-800 mb-2">
+                      ¡Pre-asistencia enviada!
+                    </h3>
+                    <p className="text-gray-600 mb-6 font-medium leading-relaxed">
+                      Tu registro para{" "}
+                      <strong className="text-gray-800">
+                        {eventoSeleccionado.titulo}
+                      </strong>{" "}
+                      ha sido confirmado exitosamente.
+                    </p>
+                    <button
+                      onClick={() => {
+                        setMostrarPopup(false);
+                        navegarA("eventos");
+                      }}
+                      className="w-full bg-green-600 text-white py-3 rounded-xl font-bold hover:bg-green-700 transition-all shadow-md hover:shadow-lg"
+                    >
+                      Entendido
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>
