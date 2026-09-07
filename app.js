@@ -33,6 +33,7 @@ function App() {
   const [preRegistradosEvento, setPreRegistradosEvento] = useState([]);
   const [asistentesFinalesEvento, setAsistentesFinalesEvento] = useState([]);
   const [yaRegistrado, setYaRegistrado] = useState(false);
+  const [misInvitaciones, setMisInvitaciones] = useState([]); // Para visualizacion de tarjetas de evento de usuarios permitidos
 
   // ESTADOS DEL QR Y CONFIRMACIÓN FINAL
   const [mostrarModalQR, setMostrarModalQR] = useState(false);
@@ -68,6 +69,10 @@ function App() {
     const diferenciaMs = fin - inicio;
     const dias = Math.ceil(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
     return dias > 0 ? dias : 1; // Si por error ponen fecha fin anterior a la de inicio, regresa 1
+
+   
+  
+
   };
 
   // === EFECTOS DE GUARDADO Y CARGA INICIAL ===
@@ -77,9 +82,15 @@ function App() {
   }, [pantallaActual, esAdmin]);
 
   useEffect(() => {
-    if (pantallaActual === "admin_eventos" || pantallaActual === "eventos")
+    if (pantallaActual === "admin_eventos") {
       obtenerEventos("publico");
-    if (pantallaActual === "admin_eventos_internos") obtenerEventos("interno");
+    } else if (pantallaActual === "admin_eventos_internos") {
+      obtenerEventos("interno");
+    } else if (pantallaActual === "eventos") {
+      // MAGIA: A los mortales les descargamos ambas colecciones
+      obtenerEventos("publico");
+      obtenerEventos("interno");
+    }
 
     if (
       esAdmin &&
@@ -130,27 +141,40 @@ function App() {
           const diccionarioAsistencias = {};
           snapshot.docs.forEach((doc) => {
             const data = doc.data();
-            diccionarioAsistencias[data.numEmpleado] = data.diasAsistidos || [1];
+            if(data.numEmpleado) {
+              // BLINDAJE AL LEER: Quitamos espacios y forzamos números
+              const empId = String(data.numEmpleado).trim();
+              const diasNum = (data.diasAsistidos || [1]).map(d => Number(d));
+              diccionarioAsistencias[empId] = diasNum;
+            }
           });
           setAsistentesFinalesEvento(diccionarioAsistencias);
         });
     }
 
+    
     // 3. Tiempo real para el USUARIO
-    if (
-      !esAdmin &&
-      pantallaActual === "detalle_evento" &&
-      eventoSeleccionado &&
-      numEmpleado
-    ) {
-      const docIdUnico = `${eventoSeleccionado.id}_${numEmpleado}`;
-      unsubscribePre = db
+    if (!esAdmin && numEmpleado) {
+      // 3.1 Escuchador Global: Descarga todas las invitaciones de este usuario
+      unsubscribeUsuario = db
         .collection("pre_asistencias")
-        .where("eventoId", "==", eventoSeleccionado.id)
+        .where("numEmpleado", "==", String(numEmpleado).trim())
         .onSnapshot((snapshot) => {
-          const listaPre = snapshot.docs.map((doc) => String(doc.data().numEmpleado).trim());
-          setPreRegistradosEvento(listaPre);
+          // Extraemos solo los IDs de los eventos a los que lo invitaron
+          const invitaciones = snapshot.docs.map((doc) => doc.data().eventoId);
+          setMisInvitaciones(invitaciones);
         });
+
+      // 3.2 Escuchador Específico: Mantiene viva la pantalla de Detalles del Evento
+      if (pantallaActual === "detalle_evento" && eventoSeleccionado) {
+        unsubscribePre = db
+          .collection("pre_asistencias")
+          .where("eventoId", "==", eventoSeleccionado.id)
+          .onSnapshot((snapshot) => {
+            const listaPre = snapshot.docs.map((doc) => String(doc.data().numEmpleado).trim());
+            setPreRegistradosEvento(listaPre);
+          });
+      }
     }
 
     return () => {
@@ -276,6 +300,7 @@ function App() {
         }
       }
 
+      // REGLA MÁXIMA: Si no existe en la Lista de Maestros General, aquí mismo rebota (Público o Interno).
       const docRef = db.collection("directorio_fime").doc(inputLimpio);
       const docSnap = await docRef.get();
 
@@ -285,12 +310,42 @@ function App() {
         setEsAdmin(false);
 
         if (qrEventoId) {
+          // --- EL CADENERO DEL QR ---
+          let eventoDoc = await db.collection("eventos_fime").doc(qrEventoId).get();
+          let esInterno = false;
+          
+          // Si no lo encuentra en públicos, busca en internos
+          if (!eventoDoc.exists) {
+            eventoDoc = await db.collection("eventos_internos_fime").doc(qrEventoId).get();
+            if (eventoDoc.exists) esInterno = true;
+          }
+
+          if (!eventoDoc.exists) {
+            setError("❌ El evento que escaneaste ya no existe.");
+            setCargando(false);
+            return;
+          }
+
+          // Si el evento es interno, exige que el usuario esté específicamente en el Excel de invitados
+          if (esInterno) {
+            const docIdUnico = `${qrEventoId}_${inputLimpio}`;
+            const preSnap = await db.collection("pre_asistencias").doc(docIdUnico).get();
+            
+            if (!preSnap.exists) {
+              setError("⚠️ Acceso denegado: No estás en la lista exclusiva de invitados para esta reunión.");
+              setCargando(false);
+              return;
+            }
+          }
+          // Si es público, pasa directo porque ya validamos que existe en la Lista de Maestros arriba.
+          // --------------------------
+          
           setPantallaActual("confirmar_asistencia");
         } else {
           setPantallaActual("registro");
         }
       } else {
-        setError("Número de empleado o clave de acceso no reconocido.");
+        setError("Acceso denegado. Número de empleado no registrado en la Base de Datos de FIME.");
       }
     } catch (err) {
       console.error("Error al consultar:", err);
@@ -348,10 +403,7 @@ function App() {
       // 1. Buscamos el evento para saber su fecha de inicio y si es multidia
       let eventoDoc = await db.collection("eventos_fime").doc(qrEventoId).get();
       if (!eventoDoc.exists) {
-        eventoDoc = await db
-          .collection("eventos_internos_fime")
-          .doc(qrEventoId)
-          .get();
+        eventoDoc = await db.collection("eventos_internos_fime").doc(qrEventoId).get();
       }
 
       if (!eventoDoc.exists) {
@@ -362,43 +414,40 @@ function App() {
 
       const eventoData = eventoDoc.data();
 
-      // 2. Calculamos qué día es HOY respecto al inicio del evento
+      // 2. Calculamos qué día es HOY (Forzamos a que sea NÚMERO)
       const fechaHoyLocal = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD
-      const diaEscaneado = calcularDiasEvento(
+      const diaEscaneado = Number(calcularDiasEvento(
         eventoData.fecha,
         fechaHoyLocal,
         eventoData.esMultiDia,
-      );
+      ));
 
-      const docIdUnico = `${qrEventoId}_${numEmpleado}`;
+      // BLINDAJE: Limpiamos espacios basura del número de empleado
+      const numLimpio = String(numEmpleado).trim();
+      const docIdUnico = `${qrEventoId}_${numLimpio}`;
+      
       const docRef = db.collection("asistencias").doc(docIdUnico);
       const docSnap = await docRef.get();
 
       if (docSnap.exists) {
         const dataAnterior = docSnap.data();
-        if (
-          dataAnterior.diasAsistidos &&
-          dataAnterior.diasAsistidos.includes(diaEscaneado)
-        ) {
-          alert(
-            `⚠️ Ya habías confirmado tu asistencia para el DÍA ${diaEscaneado} de este evento.`,
-          );
+        if (dataAnterior.diasAsistidos && dataAnterior.diasAsistidos.map(d => Number(d)).includes(diaEscaneado)) {
+          alert(`⚠️ Ya habías confirmado tu asistencia para el DÍA ${diaEscaneado} de este evento.`);
         } else {
           // Si ya existía pero es un día nuevo, le sumamos el día al arreglo
           await docRef.update({
-            diasAsistidos:
-              firebase.firestore.FieldValue.arrayUnion(diaEscaneado),
+            diasAsistidos: firebase.firestore.FieldValue.arrayUnion(diaEscaneado),
             ultimaFirma: firebase.firestore.FieldValue.serverTimestamp(),
           });
           setConfirmacionExitosa(true);
         }
       } else {
-        // Registro por primera vez (Día 1 u otro)
+        // Registro por primera vez
         await docRef.set({
           eventoId: qrEventoId,
-          numEmpleado: numEmpleado,
+          numEmpleado: numLimpio, // ID ultra limpio
           nombreMaestro: nombreMaestro,
-          diasAsistidos: [diaEscaneado],
+          diasAsistidos: [diaEscaneado], // Guardado como número real
           fechaFirma: firebase.firestore.FieldValue.serverTimestamp(),
         });
         setConfirmacionExitosa(true);
@@ -407,15 +456,10 @@ function App() {
       if (
         confirmacionExitosa ||
         !docSnap.exists ||
-        (docSnap.exists &&
-          !docSnap.data().diasAsistidos?.includes(diaEscaneado))
+        (docSnap.exists && !docSnap.data().diasAsistidos?.map(d => Number(d)).includes(diaEscaneado))
       ) {
         setTimeout(() => {
-          window.history.replaceState(
-            {},
-            document.title,
-            window.location.pathname,
-          );
+          window.history.replaceState({}, document.title, window.location.pathname);
           setQrEventoId(null);
           cerrarSesion();
         }, 3500);
@@ -664,6 +708,22 @@ function App() {
   // ==========================================
   // EXPORTACIÓN A EXCEL Y PDF
   // ==========================================
+
+  const exportarDirectorio = () => {
+    // 1. Mapeamos la lista general con los encabezados exactos que pide el sistema
+    const datosExportar = maestrosFiltradosGeneral.map((m) => ({
+      "TRAYECTORIA": m.trayectoria || "",
+      "NO. EMPLEADO": m.id,
+      "NOMBRE DEL DOCENTE": m.nombreCompleto,
+    }));
+
+    // 2. Creamos y descargamos el Excel
+    const worksheet = XLSX.utils.json_to_sheet(datosExportar);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Directorio_FIME");
+    XLSX.writeFile(workbook, `Directorio_General_FIME.xlsx`);
+  };
+  
   const exportarLista = (formato) => {
     if (!eventoSeleccionado) return;
 
@@ -729,99 +789,147 @@ function App() {
       });
       doc.save(`Asistencias_${eventoSeleccionado.titulo}.pdf`);
     }
+    
+    // Cierra el menú automáticamente al terminar
+    setMenuDescargaAbierto(false);
   };
 
   const procesarArchivoLista = (e) => {
     const file = e.target.files[0];
     if (!file) return;
     if (file.name.endsWith(".pdf")) {
-      alert(
-        "⚠️ Sube un archivo Excel (.xlsx) para garantizar que los números se vinculen correctamente.",
-      );
+      alert("⚠️ Sube un archivo Excel (.xlsx) para garantizar que los números se vinculen correctamente.");
       return;
     }
+    
     setCargando(true);
     const reader = new FileReader();
+    
     reader.onload = async (evt) => {
       try {
         const bstr = evt.target.result;
         const wb = XLSX.read(bstr, { type: "binary" });
         const wsname = wb.SheetNames[0];
-        const data = XLSX.utils.sheet_to_json(wb.Sheets[wsname]);
+        
+        // LEEMOS COMO MATRIZ (Arreglo de arreglos) PARA NO DEPENDER DE LA FILA 1
+        const filas = XLSX.utils.sheet_to_json(wb.Sheets[wsname], { header: 1 });
         const batch = db.batch();
         let agregados = 0;
+        const numEmpleadosNuevos = [];
 
-        data.forEach((fila) => {
-          const claves = Object.keys(fila);
-          const colEmp = claves.find(
-            (c) =>
-              c.toLowerCase().includes("empleado") ||
-              c.toLowerCase().includes("matricula"),
-          );
-          const colNom = claves.find(
-            (c) =>
-              c.toLowerCase().includes("nombre") ||
-              c.toLowerCase().includes("docente"),
-          );
+        // Función ninja para limpiar acentos y espacios extra
+        const normalizar = (texto) => String(texto).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 
-          if (colEmp && colNom && fila[colEmp]) {
-            const numEmpStr = String(fila[colEmp]).trim();
-            const nombreDocente = fila[colNom];
+        // 1. EL ESCÁNER: Buscamos en las primeras 10 filas dónde están los encabezados
+        let idxFilaTitulos = -1;
+        let idxColEmp = -1;
+        let idxColNom = -1;
 
-            // 1. Guardar en el directorio general de FIME
+        for (let i = 0; i < Math.min(10, filas.length); i++) {
+          const fila = filas[i];
+          if (!fila || fila.length === 0) continue;
+          
+          // Buscamos algo que suene a empleado o matrícula
+          idxColEmp = fila.findIndex(celda => celda && (normalizar(celda).includes("empleado") || normalizar(celda).includes("matricula") || normalizar(celda).includes("emp")));
+          // Buscamos algo que suene a nombre
+          idxColNom = fila.findIndex(celda => celda && (normalizar(celda).includes("nombre") || normalizar(celda).includes("docente") || normalizar(celda).includes("maestro")));
+          
+          // Si encontró ambas columnas en esta fila, ¡bingo!
+          if (idxColEmp !== -1 && idxColNom !== -1) {
+            idxFilaTitulos = i;
+            break;
+          }
+        }
+
+        if (idxFilaTitulos === -1) {
+          alert("⚠️ El sistema no pudo encontrar las columnas de 'No. Empleado' y 'Nombre' en tu archivo. Verifica el Excel.");
+          setCargando(false);
+          e.target.value = null;
+          return;
+        }
+
+        // 2. EXTRAER DATOS: Empezamos a leer desde la fila SIGUIENTE a los títulos
+        for (let i = idxFilaTitulos + 1; i < filas.length; i++) {
+          const fila = filas[i];
+          const numEmpRaw = fila[idxColEmp];
+          const nombreRaw = fila[idxColNom];
+
+          // Verificamos que la celda de empleado tenga datos reales
+          if (numEmpRaw !== undefined && numEmpRaw !== null && String(numEmpRaw).trim() !== "") {
+            const numEmpStr = String(numEmpRaw).trim();
+            const nombreDocente = nombreRaw ? String(nombreRaw).trim() : "SIN NOMBRE";
+
+            // Guardamos en directorio general
             const docRef = db.collection("directorio_fime").doc(numEmpStr);
-            batch.set(
-              docRef,
-              { nombreCompleto: nombreDocente, registrado: true },
-              { merge: true },
-            );
+            batch.set(docRef, { nombreCompleto: nombreDocente, registrado: true }, { merge: true });
 
-            // 2. NUEVO: Inscribirlos automáticamente a la lista de este evento
+            // Inscribimos al evento interno
             if (eventoSeleccionado) {
               const docIdUnico = `${eventoSeleccionado.id}_${numEmpStr}`;
-              const preAsisRef = db
-                .collection("pre_asistencias")
-                .doc(docIdUnico);
+              const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
               batch.set(preAsisRef, {
                 eventoId: eventoSeleccionado.id,
                 numEmpleado: numEmpStr,
                 nombreMaestro: nombreDocente,
                 fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
               });
+              
+              numEmpleadosNuevos.push(numEmpStr);
             }
-
             agregados++;
           }
-        });
-        // ... (código anterior del batch)
+        }
+
         await batch.commit();
         
-        // --- NUEVO: ACTUALIZACIÓN OPTIMISTA (Fuerza a la tabla a reaccionar al instante) ---
+        // Actualizamos la tabla visual al instante
         if (eventoSeleccionado) {
-          const numEmpleadosNuevos = [];
-          data.forEach((fila) => {
-            const claves = Object.keys(fila);
-            const colEmp = claves.find((c) => c.toLowerCase().includes("empleado") || c.toLowerCase().includes("matricula"));
-            if (colEmp && fila[colEmp]) {
-              numEmpleadosNuevos.push(String(fila[colEmp]).trim());
-            }
-          });
-          // Le inyectamos los IDs directo a la variable de la tabla
           setPreRegistradosEvento(prev => [...new Set([...(prev || []), ...numEmpleadosNuevos])]);
         }
-        // ----------------------------------------------------------------------------------
 
-        alert(`✅ Carga exitosa. Se actualizaron ${agregados} registros.`);
+        alert(`✅ Carga exitosa. Se detectaron y registraron ${agregados} maestros.`);
         obtenerMaestros();
       } catch (error) {
-
+        console.error(error);
         alert("❌ Error al procesar el archivo Excel.");
       } finally {
         setCargando(false);
         e.target.value = null;
       }
     };
+    
     reader.readAsBinaryString(file);
+  };
+  
+  const eliminarExcelCargado = async () => {
+    const confirmacion = window.confirm(
+      "⚠️ ¿Estás seguro de eliminar a todos los invitados de este evento? Esta acción vaciará la lista permanentemente."
+    );
+    if (!confirmacion) return;
+
+    setCargando(true);
+    try {
+      const snapshotPre = await db
+        .collection("pre_asistencias")
+        .where("eventoId", "==", eventoSeleccionado.id)
+        .get();
+      
+      if (!snapshotPre.empty) {
+        const batch = db.batch();
+        snapshotPre.docs.forEach((doc) => {
+          batch.delete(doc.ref);
+        });
+        await batch.commit();
+      }
+      
+      // Vaciamos la memoria visual al instante
+      setPreRegistradosEvento([]);
+      alert("🗑️ Lista de invitados eliminada correctamente.");
+    } catch (error) {
+      console.error(error);
+      alert("❌ Error al eliminar el archivo.");
+    }
+    setCargando(false);
   };
 
   // ==========================================
@@ -1282,17 +1390,27 @@ function App() {
                   </h2>
                 </div>
                 <div className="flex gap-2 relative">
-                  {/* CONDICIÓN: SOLO SE MUESTRA SI EL EVENTO ES INTERNO */}
+                  {/* CONDICIÓN: SUBIR EXCEL VS ELIMINAR EXCEL */}
                   {eventoSeleccionado?.tipo === "interno" && (
-                    <label className="bg-green-100 text-green-700 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold cursor-pointer flex items-center shadow-sm">
-                      📂 Subir Excel
-                      <input
-                        type="file"
-                        accept=".xlsx, .xls, .pdf"
-                        className="hidden"
-                        onChange={procesarArchivoLista}
-                      />
-                    </label>
+                    (!preRegistradosEvento || preRegistradosEvento.length === 0) ? (
+                      <label className="bg-green-100 text-green-700 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold cursor-pointer flex items-center shadow-sm transition-colors">
+                        📂 Subir Excel
+                        <input
+                          type="file"
+                          accept=".xlsx, .xls"
+                          className="hidden"
+                          onChange={procesarArchivoLista}
+                        />
+                      </label>
+                    ) : (
+                      <button
+                        onClick={eliminarExcelCargado}
+                        disabled={cargando}
+                        className="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
+                      >
+                        🗑️ Eliminar Excel
+                      </button>
+                    )
                   )}
 
                   <div className="relative">
@@ -1395,14 +1513,17 @@ function App() {
                                 {/* PRE-ASISTENCIA (Se oculta visualmente si es evento interno) */}
                                 {eventoSeleccionado?.tipo !== "interno" && (
                                   <td className="p-4 text-center text-xl">
-                                    {preRegistradosEvento.includes(maestro.id) ? "✅" : "❗"}
+                                    {/* BLINDAJE: Limpiamos el ID también aquí */}
+                                    {preRegistradosEvento.includes(String(maestro.id).trim()) ? "✅" : "❗"}
                                   </td>
                                 )}
 
                                 {/* DIBUJAMOS LAS CELDAS DE ASISTENCIA MULTIDÍA */}
                                 {[...Array(numDias)].map((_, index) => {
                                   const diaColumna = index + 1;
-                                  const asistioEseDia = asistentesFinalesEvento[maestro.id]?.includes(diaColumna);
+                                  // BLINDAJE: Búsqueda cruzada exacta
+                                  const idLimpio = String(maestro.id).trim();
+                                  const asistioEseDia = asistentesFinalesEvento[idLimpio]?.includes(diaColumna);
                                   
                                   return (
                                     <td
@@ -1449,12 +1570,20 @@ function App() {
                     </button>
                   </div>
                 ) : (
-                  <button
-                    onClick={iniciarEdicion}
-                    className={`${themeBg} text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:opacity-90`}
-                  >
-                    ✏️ Editar Tabla
-                  </button>
+                  <div className="flex space-x-3">
+                    <button
+                      onClick={exportarDirectorio}
+                      className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-green-700 flex items-center gap-2"
+                    >
+                      📥 Descargar Excel
+                    </button>
+                    <button
+                      onClick={iniciarEdicion}
+                      className={`${themeBg} text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:opacity-90 flex items-center gap-2`}
+                    >
+                      ✏️ Editar Tabla
+                    </button>
+                  </div>
                 )}
               </div>
 
@@ -1509,9 +1638,21 @@ function App() {
                           </tr>
                         ))}
                       {modoEdicion &&
-                        cambiosDirectorio.map((maestro, index) => (
-                          <tr key={index} className="bg-sky-50/30">
-                            <td className="p-2">
+                        cambiosDirectorio.map((maestro, index) => {
+                          // 1. Verificamos si el maestro coincide con lo escrito en la barra
+                          const textoBusqueda = busquedaMaestros.toLowerCase();
+                          const nombre = maestro.nombreCompleto ? maestro.nombreCompleto.toLowerCase() : "";
+                          const idMaestro = maestro.id ? String(maestro.id).toLowerCase() : "";
+                          
+                          // 2. Si hay búsqueda y no hay coincidencia, ocultamos la fila (return null)
+                          if (busquedaMaestros && !nombre.includes(textoBusqueda) && !idMaestro.includes(textoBusqueda)) {
+                            return null;
+                          }
+
+                          // 3. Si coincide, dibujamos la fila normalmente manteniendo su index original
+                          return (
+                            <tr key={index} className="bg-sky-50/30">
+                              <td className="p-2">
                               <input
                                 type="text"
                                 value={maestro.trayectoria}
@@ -1561,7 +1702,8 @@ function App() {
                               </button>
                             </td>
                           </tr>
-                        ))}
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -1586,7 +1728,7 @@ function App() {
                   {editandoEventoId ? "Editar Evento" : "Crear Nuevo Evento"}
                 </h2>
                 <button
-                  onClick={() => navegarA("admin_eventos")}
+                  onClick={() => navegarA(formEvento.tipo === "interno" ? "admin_eventos_internos" : "admin_eventos")}
                   className="text-gray-500 hover:text-gray-800 text-sm font-bold"
                 >
                   &larr; Cancelar
@@ -1826,11 +1968,22 @@ function App() {
                 </p>
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {listaEventos.map((evento) => (
-                  <div
-                    key={evento.id}
-                    className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100 transition-transform hover:-translate-y-1"
-                  >
+                {/* Juntamos ambas listas en una sola antes de filtrarlas */}
+                {[...listaEventos, ...listaEventosInternos]
+                  /* --- EL CANDADO MÁGICO DE SEGURIDAD --- */
+                  .filter((evento) => {
+                    // 1. Si el evento es público, pasa directo sin pedir credencial
+                    if (evento.tipo !== "interno") return true;
+                    
+                    // 2. Si es interno, revisamos si el ID del evento está en su cartera de invitaciones
+                    return misInvitaciones.includes(evento.id);
+                  })
+                  /* -------------------------------------- */
+                  .map((evento) => (
+                    <div
+                      key={evento.id}
+                      className="bg-white rounded-xl shadow-md overflow-hidden flex flex-col border border-gray-100 transition-transform hover:-translate-y-1"
+                    >
                     <div className="h-40 bg-gray-200 relative overflow-hidden">
                       <img
                         src={evento.portada}
@@ -1880,51 +2033,38 @@ function App() {
                 >
                   &larr; Regresar a Eventos
                 </button>
-                <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-100">
-                  <div className="h-64 bg-gray-200 relative overflow-hidden">
-                    <img
-                      src={eventoSeleccionado.portada}
-                      alt={eventoSeleccionado.titulo}
-                      className="w-full h-full object-cover"
-                    />
-                  </div>
-                  <div className="p-6 md:p-8">
-                    <h2 className="text-2xl md:text-3xl font-bold text-gray-800 mb-2">
-                      {eventoSeleccionado.titulo}
-                    </h2>
-                    <div className="flex items-center space-x-4 text-sm text-gray-500 mb-6 font-medium">
-                      <span className="flex items-center bg-gray-50 px-3 py-1 rounded-full border border-gray-100">
-                        📅 {eventoSeleccionado.fecha}
-                      </span>
-                      <span className="flex items-center bg-gray-50 px-3 py-1 rounded-full border border-gray-100">
-                        ⏰ {eventoSeleccionado.hora || "Por definir"}
-                      </span>
-                    </div>
-                    <div className="text-gray-600 mb-8 whitespace-pre-wrap leading-relaxed">
-                      {eventoSeleccionado.descripcion ||
-                        "Sin descripción detallada."}
-                    </div>
-                    <div className="flex flex-col sm:flex-row gap-4 border-t border-gray-100 pt-6">
+                <div className="flex flex-col sm:flex-row gap-4 border-t border-gray-100 pt-6">
                       <button
                         onClick={() => navegarA("eventos")}
                         className="flex-1 bg-gray-100 text-gray-700 py-3 px-4 rounded-lg font-bold hover:bg-gray-200 transition-all flex justify-center items-center"
                       >
                         Regresar
                       </button>
-                      <button
-                        onClick={registrarPreAsistencia}
-                        disabled={cargando || yaRegistrado}
-                        className={`flex-1 text-white py-3 px-4 rounded-lg font-bold transition-all flex justify-center items-center gap-2 ${yaRegistrado ? "bg-gray-400 cursor-not-allowed" : "bg-green-600 hover:bg-green-700 shadow-md hover:shadow-lg"}`}
-                      >
-                        {cargando
-                          ? "Procesando..."
-                          : yaRegistrado
-                            ? "✅ Ya estás registrado"
-                            : "✅ Pre-asistencia"}
-                      </button>
+                      
+                      {/* MAGIA VISUAL: Si es interno muestra letrero, si es público muestra botón */}
+                      {eventoSeleccionado.tipo === "interno" ? (
+                        <div className="flex-[2] bg-gradient-to-r from-amber-50 to-orange-50 p-4 rounded-xl border border-amber-200 text-center flex flex-col justify-center shadow-inner">
+                          <span className="font-semibold text-gray-700 text-sm mb-1">
+                            Ya estás invitado al evento.
+                          </span>
+                          <span className="font-black tracking-wide text-orange-600 drop-shadow-sm text-[0.90rem] sm:text-base">
+                            FAVOR DE CONFIRMAR ASISTENCIA MEDIANTE EL QR ENVIADO
+                          </span>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={registrarPreAsistencia}
+                          disabled={cargando || yaRegistrado}
+                          className={`flex-1 text-white py-3 px-4 rounded-lg font-bold transition-all flex justify-center items-center gap-2 ${yaRegistrado ? "bg-gray-400 cursor-not-allowed" : "bg-green-600 hover:bg-green-700 shadow-md hover:shadow-lg"}`}
+                        >
+                          {cargando
+                            ? "Procesando..."
+                            : yaRegistrado
+                              ? "✅ Ya estás registrado"
+                              : "✅ Pre-asistencia"}
+                        </button>
+                      )}
                     </div>
-                  </div>
-                </div>
 
                 {/* MODAL DE ÉXITO ACTUALIZADO */}
                 {mostrarPopup && (
