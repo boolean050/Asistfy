@@ -1393,7 +1393,7 @@ function App() {
             onClick={cerrarSesion}
             className="w-full bg-red-600/80 hover:bg-red-600 text-white py-2 rounded-lg text-sm font-bold transition-colors"
           >
-            🚪 Cerrar Sesión
+            Cerrar Sesión
           </button>
         </div>
       </aside>
