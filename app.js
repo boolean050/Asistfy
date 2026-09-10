@@ -60,6 +60,11 @@ function App() {
   const [busquedaAsistencias, setBusquedaAsistencias] = useState("");
   const [menuDescargaAbierto, setMenuDescargaAbierto] = useState(false);
 
+  // === NUEVOS ESTADOS PARA SELECCIÓN ===
+  const [modoSeleccionDescarga, setModoSeleccionDescarga] = useState(false);
+  const [maestrosSeleccionados, setMaestrosSeleccionados] = useState([]);
+  const [menuDescargaGeneralAbierto, setMenuDescargaGeneralAbierto] = useState(false);
+
   // === CÁLCULO DE DÍAS PARA EVENTOS MULTI-DÍA ===
   const calcularDiasEvento = (fechaInicio, fechaFin, esMultiDia) => {
     if (!esMultiDia || !fechaFin || !fechaInicio) return 1;
@@ -76,7 +81,8 @@ function App() {
     if (!evento.fecha) return false;
     const fechaRef =
       evento.esMultiDia && evento.fechaFin ? evento.fechaFin : evento.fecha;
-    const horaRef = evento.horaFin || evento.hora || "23:59";
+    // CORRECCIÓN: Ya NO toma evento.hora. Si no hay hora fin, se va hasta las 23:59.
+    const horaRef = evento.horaFin || "23:59";
     const limite = new Date(`${fechaRef}T${horaRef}:00`);
     return new Date() > limite;
   };
@@ -85,11 +91,75 @@ function App() {
     if (!evento.fecha) return 15;
     const fechaRef =
       evento.esMultiDia && evento.fechaFin ? evento.fechaFin : evento.fecha;
-    const horaRef = evento.horaFin || evento.hora || "23:59";
+    // CORRECCIÓN: Ya NO toma evento.hora. Si no hay hora fin, se va hasta las 23:59.
+    const horaRef = evento.horaFin || "23:59";
     const limite = new Date(`${fechaRef}T${horaRef}:00`);
     const diferenciaMs = new Date() - limite;
     const diasPasados = Math.floor(diferenciaMs / (1000 * 60 * 60 * 24));
     return Math.max(15 - diasPasados, 0);
+  };
+
+  // === NUEVO: TRADUCTOR DE FECHAS (EJ. 2026-Ago-22) ===
+  const obtenerFechaFormateada = (fechaInicio, diaIndex) => {
+    if (!fechaInicio) return `DÍA ${diaIndex + 1}`;
+    const [year, month, day] = fechaInicio.split("-");
+    const fecha = new Date(year, month - 1, day);
+    fecha.setDate(fecha.getDate() + diaIndex);
+    const meses = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+    return `${fecha.getFullYear()}-${meses[fecha.getMonth()]}-${String(fecha.getDate()).padStart(2, "0")}`;
+  };
+
+  // === NUEVO: DETECTOR DE EVENTOS FUTUROS ===
+  const esEventoFuturo = (fechaEvento) => {
+    if (!fechaEvento) return false;
+    const fechaHoyLocal = new Date().toLocaleDateString("en-CA"); // Calcula el hoy exacto (YYYY-MM-DD)
+    return fechaEvento > fechaHoyLocal;
+  };
+
+  // === NUEVO: MODO DIOS (ALTERAR ASISTENCIAS CON 1 CLIC) BLINDADO ===
+  const toggleAsistenciaManual = async (maestro, diaColumna) => {
+    if (!eventoSeleccionado) return;
+
+    const idLimpio = String(maestro.id).trim();
+    const docIdUnico = `${eventoSeleccionado.id}_${idLimpio}`;
+    const docRef = db.collection("asistencias").doc(docIdUnico);
+
+    try {
+      const docSnap = await docRef.get();
+
+      if (docSnap.exists) {
+        // 1. Extraemos el arreglo de la BD y forzamos que TODO sea número
+        const dataActual = docSnap.data();
+        let diasActuales = dataActual.diasAsistidos ? dataActual.diasAsistidos.map(Number) : [];
+        const diaBuscado = Number(diaColumna);
+
+        // 2. Lógica matemática a prueba de fallos
+        if (diasActuales.includes(diaBuscado)) {
+          diasActuales = diasActuales.filter(d => d !== diaBuscado); // Quitamos la palomita
+        } else {
+          diasActuales.push(diaBuscado); // Ponemos la palomita
+        }
+
+        // 3. Sobrescribimos el arreglo completo en la nube
+        await docRef.update({
+          diasAsistidos: diasActuales,
+          ultimaModificacionAdmin: firebase.firestore.FieldValue.serverTimestamp()
+        });
+
+      } else {
+        // Si no existe el documento, lo creamos
+        await docRef.set({
+          eventoId: eventoSeleccionado.id,
+          numEmpleado: idLimpio,
+          nombreMaestro: maestro.nombreCompleto || "Desconocido",
+          diasAsistidos: [Number(diaColumna)],
+          fechaFirma: firebase.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    } catch (error) {
+      console.error("Error al modificar asistencia:", error);
+      alert("❌ Error de conexión al intentar cambiar la asistencia.");
+    }
   };
 
   // === EFECTOS DE GUARDADO Y CARGA INICIAL ===
@@ -109,13 +179,16 @@ function App() {
       obtenerEventos("interno");
     }
 
-    if (
-      esAdmin &&
-      (pantallaActual === "admin_maestros" ||
-        pantallaActual === "admin_asistencia_evento")
-    ) {
-      obtenerMaestros();
-    }
+    // BLINDAJE: Cargamos a los maestros también en el Historial para que nunca aparezca en blanco
+          if (
+            esAdmin &&
+            (pantallaActual === "admin_maestros" ||
+              pantallaActual === "admin_asistencia_evento" ||
+              pantallaActual === "eventos_recientes" ||
+              pantallaActual === "detalle_evento")
+          ) {
+            obtenerMaestros();
+          }
   }, [pantallaActual, esAdmin]);
 
   // === EFECTOS EN TIEMPO REAL (ADIÓS AL F5 Y RETRASOS) ===
@@ -822,10 +895,81 @@ function App() {
     XLSX.writeFile(workbook, `Directorio_General_FIME.xlsx`);
   };
 
-  // === NUEVO: DESCARGAR HISTÓRICO DIRECTO (ADMIN) ===
+  // === NUEVA FUNCIÓN: EXPORTAR SOLO LOS SELECCIONADOS ===
+  const exportarSeleccion = () => {
+    if (maestrosSeleccionados.length === 0) {
+      alert("⚠️ Selecciona al menos un maestro para descargar.");
+      return;
+    }
+    const datosExportar = listaDirectorio
+      .filter((m) => maestrosSeleccionados.includes(m.id))
+      .map((m) => ({
+        "NO. EMPLEADO": m.id,
+        "NOMBRE DEL DOCENTE": m.nombreCompleto,
+      }));
+
+    const worksheet = XLSX.utils.json_to_sheet(datosExportar);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Invitados");
+    XLSX.writeFile(workbook, `Invitados_Seleccionados.xlsx`);
+    
+    // Limpiamos y salimos del modo
+    setModoSeleccionDescarga(false);
+    setMaestrosSeleccionados([]);
+  };
+
+  // === NUEVA FUNCIÓN: AUTO-CARGAR A TODO EL DIRECTORIO (BOTÓN LILA) ===
+  const cargarTodosLosMaestrosEventoInterno = async () => {
+    if (!eventoSeleccionado) return;
+    const confirmacion = window.confirm("¿Estás seguro de registrar a TODOS los maestros del directorio general en este evento?");
+    if (!confirmacion) return;
+
+    setCargando(true);
+    try {
+      const batch = db.batch();
+      const numEmpleadosNuevos = [];
+
+      listaDirectorio.forEach((maestro) => {
+        const idLimpio = String(maestro.id).trim();
+        const docIdUnico = `${eventoSeleccionado.id}_${idLimpio}`;
+        const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
+
+        batch.set(preAsisRef, {
+          eventoId: eventoSeleccionado.id,
+          numEmpleado: idLimpio,
+          nombreMaestro: maestro.nombreCompleto,
+          fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
+        });
+        numEmpleadosNuevos.push(idLimpio);
+      });
+
+      await batch.commit();
+      setPreRegistradosEvento((prev) => [...new Set([...(prev || []), ...numEmpleadosNuevos])]);
+      alert(`✅ Carga masiva exitosa. Se registraron ${listaDirectorio.length} maestros en el evento.`);
+    } catch (error) {
+      console.error(error);
+      alert("❌ Error al cargar la lista de maestros.");
+    }
+    setCargando(false);
+  };
+
+
+  
+  // === NUEVO: DESCARGAR HISTÓRICO DIRECTO (ADMIN) BLINDADO ===
   const descargarHistoricoAdmin = async (evento) => {
     setCargando(true);
     try {
+      // 1. SEGURO: Si el directorio está vacío en memoria, lo descargamos de emergencia
+      let directorioActual = listaDirectorio;
+      if (directorioActual.length === 0) {
+        const dirSnap = await db.collection("directorio_fime").get();
+        directorioActual = dirSnap.docs.map((doc) => ({
+          id: doc.id,
+          nombreCompleto: doc.data().nombreCompleto || "",
+        }));
+        setListaDirectorio(directorioActual);
+      }
+
       // Traemos pre-asistencias
       const preSnap = await db
         .collection("pre_asistencias")
@@ -854,7 +998,9 @@ function App() {
         evento.fechaFin,
         evento.esMultiDia,
       );
-      const maestrosAExportar = listaDirectorio.filter((m) =>
+      
+      // Usamos directorioActual que ya está blindado
+      const maestrosAExportar = directorioActual.filter((m) =>
         evento.tipo === "interno" ? preIds.includes(m.id) : true,
       );
 
@@ -866,7 +1012,8 @@ function App() {
         if (evento.tipo !== "interno")
           fila["PRE-ASISTENCIA"] = preIds.includes(m.id) ? "SI" : "NO";
         for (let i = 1; i <= numDias; i++) {
-          fila[`DÍA ${i}`] = asisDict[m.id]?.includes(i) ? "SI" : "NO";
+          const nombreColumna = obtenerFechaFormateada(evento.fecha, i - 1).toUpperCase();
+          fila[nombreColumna] = asisDict[m.id]?.includes(i) ? "SI" : "NO";
         }
         return fila;
       });
@@ -910,9 +1057,11 @@ function App() {
       }
 
       // Agregamos una columna por cada día del evento
+      // Agregamos una columna por cada día del evento con la fecha exacta
       for (let i = 1; i <= numDias; i++) {
         const asistio = asistentesFinalesEvento[m.id]?.includes(i);
-        fila[`DÍA ${i}`] = asistio ? "SI" : "NO";
+        const nombreColumna = obtenerFechaFormateada(eventoSeleccionado.fecha, i - 1).toUpperCase();
+        fila[nombreColumna] = asistio ? "SI" : "NO";
       }
 
       return fila;
@@ -930,13 +1079,13 @@ function App() {
       const encabezadosPDF = ["NO. EMPLEADO", "NOMBRE DEL DOCENTE"];
       if (eventoSeleccionado.tipo !== "interno")
         encabezadosPDF.push("PRE-ASISTENCIA");
-      for (let i = 1; i <= numDias; i++) encabezadosPDF.push(`DÍA ${i}`);
+      for (let i = 1; i <= numDias; i++) encabezadosPDF.push(obtenerFechaFormateada(eventoSeleccionado.fecha, i - 1).toUpperCase());
 
       const cuerpoPDF = datosExportar.map((d) => {
         const filaDoc = [d["NO. EMPLEADO"], d["NOMBRE DEL DOCENTE"]];
         if (eventoSeleccionado.tipo !== "interno")
           filaDoc.push(d["PRE-ASISTENCIA"]);
-        for (let i = 1; i <= numDias; i++) filaDoc.push(d[`DÍA ${i}`]);
+        for (let i = 1; i <= numDias; i++) filaDoc.push(d[obtenerFechaFormateada(eventoSeleccionado.fecha, i - 1).toUpperCase()]);
         return filaDoc;
       });
 
@@ -1260,7 +1409,7 @@ function App() {
                 >
                   {cargando
                     ? "Registrando firma..."
-                    : "✅ Confirmar Asistencia"}
+                    : "Confirmar Asistencia"}
                 </button>
                 <button
                   onClick={cerrarSesion}
@@ -1511,7 +1660,9 @@ function App() {
                             <div className="flex gap-2">
                               <button
                                 onClick={() => abrirModalQR(evento)}
-                                className="bg-black hover:bg-gray-800 text-white text-xs font-bold py-1.5 px-3 rounded-lg transition-colors flex items-center gap-1"
+                                disabled={evento.tipo === "interno" && esEventoFuturo(evento.fecha)}
+                                className={`text-xs font-bold py-1.5 px-3 rounded-lg transition-colors flex items-center gap-1 ${evento.tipo === "interno" && esEventoFuturo(evento.fecha) ? "bg-gray-300 text-gray-500 cursor-not-allowed" : "bg-black hover:bg-gray-800 text-white"}`}
+                                title={evento.tipo === "interno" && esEventoFuturo(evento.fecha) ? "El QR se habilitará el día del evento" : "Mostrar QR de Asistencia"}
                               >
                                 📱 QR
                               </button>
@@ -1604,18 +1755,26 @@ function App() {
                 </div>
                 <div className="flex gap-2 relative">
                   {/* CONDICIÓN: SUBIR EXCEL VS ELIMINAR EXCEL */}
-                  {eventoSeleccionado?.tipo === "interno" &&
-                    (!preRegistradosEvento ||
-                    preRegistradosEvento.length === 0 ? (
-                      <label className="bg-green-100 text-green-700 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold cursor-pointer flex items-center shadow-sm transition-colors">
-                        📂 Subir Excel
-                        <input
-                          type="file"
-                          accept=".xlsx, .xls"
-                          className="hidden"
-                          onChange={procesarArchivoLista}
-                        />
-                      </label>
+                  {eventoSeleccionado?.tipo === "interno" && !esEventoCaducado(eventoSeleccionado) && (
+                    !preRegistradosEvento || preRegistradosEvento.length === 0 ? (
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={cargarTodosLosMaestrosEventoInterno}
+                          disabled={cargando}
+                          className="bg-purple-100 text-purple-700 border border-purple-200 hover:bg-purple-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
+                        >
+                          🔮 Subir Lista Maestros
+                        </button>
+                        <label className="bg-green-100 text-green-700 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold cursor-pointer flex items-center shadow-sm transition-colors">
+                          📂 Subir Excel
+                          <input
+                            type="file"
+                            accept=".xlsx, .xls"
+                            className="hidden"
+                            onChange={procesarArchivoLista}
+                          />
+                        </label>
+                      </div>
                     ) : (
                       <button
                         onClick={eliminarExcelCargado}
@@ -1624,7 +1783,8 @@ function App() {
                       >
                         🗑️ Eliminar Excel
                       </button>
-                    ))}
+                    )
+                  )}
 
                   <div className="relative">
                     <button
@@ -1691,21 +1851,18 @@ function App() {
                                 PRE-ASISTENCIA
                               </th>
                             )}
-
-                            {/* DIBUJAMOS LOS ENCABEZADOS DINÁMICAMENTE SEGÚN LOS DÍAS */}
                             {[...Array(numDias)].map((_, index) => (
                               <th
                                 key={index}
                                 className="p-4 text-sm font-bold text-gray-600 text-center"
                               >
-                                DÍA {index + 1}
+                                {obtenerFechaFormateada(eventoSeleccionado.fecha, index).toUpperCase()}
                               </th>
                             ))}
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-gray-100">
                           {maestrosFiltradosAsistencia
-                            /* VERSIÓN DE 1 LÍNEA: DIRECTA Y SIN FALLAS */
                             .filter((maestro) =>
                               eventoSeleccionado?.tipo === "interno"
                                 ? (preRegistradosEvento || []).some(
@@ -1726,11 +1883,8 @@ function App() {
                                 <td className="p-4 text-sm text-gray-800 font-medium">
                                   {maestro.nombreCompleto}
                                 </td>
-
-                                {/* PRE-ASISTENCIA (Se oculta visualmente si es evento interno) */}
                                 {eventoSeleccionado?.tipo !== "interno" && (
                                   <td className="p-4 text-center text-xl">
-                                    {/* BLINDAJE: Limpiamos el ID también aquí */}
                                     {preRegistradosEvento.includes(
                                       String(maestro.id).trim(),
                                     )
@@ -1738,23 +1892,28 @@ function App() {
                                       : "❗"}
                                   </td>
                                 )}
-
-                                {/* DIBUJAMOS LAS CELDAS DE ASISTENCIA MULTIDÍA */}
                                 {[...Array(numDias)].map((_, index) => {
                                   const diaColumna = index + 1;
-                                  // BLINDAJE: Búsqueda cruzada exacta
                                   const idLimpio = String(maestro.id).trim();
-                                  const asistioEseDia =
-                                    asistentesFinalesEvento[idLimpio]?.includes(
-                                      diaColumna,
-                                    );
-
+                                  const asistioEseDia = asistentesFinalesEvento[idLimpio]?.includes(diaColumna);
+                                  
                                   return (
                                     <td
                                       key={index}
                                       className="p-4 text-center text-xl bg-gray-50/30 border-l border-gray-100"
                                     >
-                                      {asistioEseDia ? "✅" : "❗"}
+                                      <button 
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          if (!esEventoCaducado(eventoSeleccionado)) {
+                                            toggleAsistenciaManual(maestro, diaColumna);
+                                          }
+                                        }}
+                                        className={`w-full h-full py-2 flex items-center justify-center focus:outline-none select-none ${esEventoCaducado(eventoSeleccionado) ? "cursor-default opacity-80" : "hover:scale-125 transition-transform cursor-pointer"}`}
+                                        title={esEventoCaducado(eventoSeleccionado) ? "Archivo Histórico (Solo lectura)" : (asistioEseDia ? "Quitar asistencia" : "Marcar asistencia")}
+                                      >
+                                        {asistioEseDia ? "✅" : "❗"}
+                                      </button>
                                     </td>
                                   );
                                 })}
@@ -1778,33 +1937,40 @@ function App() {
 
                 {modoEdicion ? (
                   <div className="flex space-x-2">
-                    <button
-                      onClick={cancelarEdicion}
-                      disabled={cargando}
-                      className="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-300"
-                    >
+                    <button onClick={cancelarEdicion} disabled={cargando} className="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-300">
                       Cancelar
                     </button>
-                    <button
-                      onClick={guardarCambios}
-                      disabled={cargando}
-                      className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-green-700 flex items-center"
-                    >
+                    <button onClick={guardarCambios} disabled={cargando} className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-green-700 flex items-center">
                       {cargando ? "Guardando..." : "💾 Guardar Todo"}
                     </button>
                   </div>
-                ) : (
-                  <div className="flex space-x-3">
-                    <button
-                      onClick={exportarDirectorio}
-                      className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-green-700 flex items-center gap-2"
-                    >
-                      📥 Descargar Excel
+                ) : modoSeleccionDescarga ? (
+                  <div className="flex space-x-2">
+                    <button onClick={() => { setModoSeleccionDescarga(false); setMaestrosSeleccionados([]); }} className="bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-300">
+                      Cancelar
                     </button>
-                    <button
-                      onClick={iniciarEdicion}
-                      className={`${themeBg} text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:opacity-90 flex items-center gap-2`}
-                    >
+                    <button onClick={exportarSeleccion} className="bg-orange-500 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-orange-600 flex items-center gap-2">
+                      📥 Descargar Selección ({maestrosSeleccionados.length})
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex space-x-3 relative">
+                    <div>
+                      <button onClick={() => setMenuDescargaGeneralAbierto(!menuDescargaGeneralAbierto)} className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-green-700 flex items-center gap-2">
+                        📥 Descargar Excel ▼
+                      </button>
+                      {menuDescargaGeneralAbierto && (
+                        <div className="absolute right-[130px] mt-2 w-56 bg-white border border-gray-200 rounded-lg shadow-xl overflow-hidden z-50">
+                          <button onClick={() => { exportarDirectorio(); setMenuDescargaGeneralAbierto(false); }} className="w-full text-left px-4 py-3 hover:bg-gray-100 text-sm font-bold text-gray-700 border-b border-gray-100">
+                            📄 Descargar Toda la Lista
+                          </button>
+                          <button onClick={() => { setModoSeleccionDescarga(true); setMenuDescargaGeneralAbierto(false); }} className="w-full text-left px-4 py-3 hover:bg-gray-100 text-sm font-bold text-orange-600">
+                            ☑️ Seleccionar y Descargar
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <button onClick={iniciarEdicion} className={`${themeBg} text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:opacity-90 flex items-center gap-2`}>
                       ✏️ Editar Tabla
                     </button>
                   </div>
@@ -1827,19 +1993,14 @@ function App() {
                   <table className="w-full text-left border-collapse">
                     <thead>
                       <tr className="bg-gray-50 border-b border-gray-200">
-                        <th className="p-4 text-sm font-bold text-gray-600 w-1/4">
-                          TRAYECTORIA
-                        </th>
-                        <th className="p-4 text-sm font-bold text-gray-600 w-1/4">
-                          NO. EMPLEADO
-                        </th>
-                        <th className="p-4 text-sm font-bold text-gray-600 w-2/4">
-                          NOMBRE DEL DOCENTE
-                        </th>
+                        {modoSeleccionDescarga && (
+                          <th className="p-4 text-sm font-bold text-orange-500 text-center w-16">☑️</th>
+                        )}
+                        <th className="p-4 text-sm font-bold text-gray-600 w-1/4">TRAYECTORIA</th>
+                        <th className="p-4 text-sm font-bold text-gray-600 w-1/4">NO. EMPLEADO</th>
+                        <th className="p-4 text-sm font-bold text-gray-600 w-2/4">NOMBRE DEL DOCENTE</th>
                         {modoEdicion && (
-                          <th className="p-4 text-sm font-bold text-red-500 text-center">
-                            ELIMINAR
-                          </th>
+                          <th className="p-4 text-sm font-bold text-red-500 text-center">ELIMINAR</th>
                         )}
                       </tr>
                     </thead>
@@ -1848,53 +2009,44 @@ function App() {
                         maestrosFiltradosGeneral.map((maestro) => (
                           <tr
                             key={maestro.id}
-                            className="hover:bg-gray-50 transition-colors"
+                            className={`transition-colors ${maestrosSeleccionados.includes(maestro.id) ? "bg-orange-50" : "hover:bg-gray-50"}`}
                           >
-                            <td className="p-4 text-sm text-gray-500">
-                              {maestro.trayectoria || "-"}
-                            </td>
-                            <td className="p-4 text-sm font-semibold text-gray-700">
-                              {maestro.id}
-                            </td>
-                            <td className="p-4 text-sm text-gray-800 font-medium">
-                              {maestro.nombreCompleto}
-                            </td>
+                            {modoSeleccionDescarga && (
+                              <td className="p-4 text-center">
+                                <input
+                                  type="checkbox"
+                                  className="w-5 h-5 accent-orange-500 cursor-pointer"
+                                  checked={maestrosSeleccionados.includes(maestro.id)}
+                                  onChange={(e) => {
+                                    if (e.target.checked) setMaestrosSeleccionados([...maestrosSeleccionados, maestro.id]);
+                                    else setMaestrosSeleccionados(maestrosSeleccionados.filter((id) => id !== maestro.id));
+                                  }}
+                                />
+                              </td>
+                            )}
+                            <td className="p-4 text-sm text-gray-500">{maestro.trayectoria || "-"}</td>
+                            <td className="p-4 text-sm font-semibold text-gray-700">{maestro.id}</td>
+                            <td className="p-4 text-sm text-gray-800 font-medium">{maestro.nombreCompleto}</td>
                           </tr>
                         ))}
+
                       {modoEdicion &&
                         cambiosDirectorio.map((maestro, index) => {
-                          // 1. Verificamos si el maestro coincide con lo escrito en la barra
                           const textoBusqueda = busquedaMaestros.toLowerCase();
-                          const nombre = maestro.nombreCompleto
-                            ? maestro.nombreCompleto.toLowerCase()
-                            : "";
-                          const idMaestro = maestro.id
-                            ? String(maestro.id).toLowerCase()
-                            : "";
+                          const nombre = maestro.nombreCompleto ? maestro.nombreCompleto.toLowerCase() : "";
+                          const idMaestro = maestro.id ? String(maestro.id).toLowerCase() : "";
 
-                          // 2. Si hay búsqueda y no hay coincidencia, ocultamos la fila (return null)
-                          if (
-                            busquedaMaestros &&
-                            !nombre.includes(textoBusqueda) &&
-                            !idMaestro.includes(textoBusqueda)
-                          ) {
+                          if (busquedaMaestros && !nombre.includes(textoBusqueda) && !idMaestro.includes(textoBusqueda)) {
                             return null;
                           }
 
-                          // 3. Si coincide, dibujamos la fila normalmente manteniendo su index original
                           return (
                             <tr key={index} className="bg-sky-50/30">
                               <td className="p-2">
                                 <input
                                   type="text"
                                   value={maestro.trayectoria}
-                                  onChange={(e) =>
-                                    handleCambioInput(
-                                      index,
-                                      "trayectoria",
-                                      e.target.value,
-                                    )
-                                  }
+                                  onChange={(e) => handleCambioInput(index, "trayectoria", e.target.value)}
                                   className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm"
                                   placeholder="Ej. 10 años"
                                 />
@@ -1903,13 +2055,7 @@ function App() {
                                 <input
                                   type="text"
                                   value={maestro.id}
-                                  onChange={(e) =>
-                                    handleCambioInput(
-                                      index,
-                                      "id",
-                                      e.target.value,
-                                    )
-                                  }
+                                  onChange={(e) => handleCambioInput(index, "id", e.target.value)}
                                   className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm font-semibold"
                                   placeholder="No. Empleado"
                                 />
@@ -1918,13 +2064,7 @@ function App() {
                                 <input
                                   type="text"
                                   value={maestro.nombreCompleto}
-                                  onChange={(e) =>
-                                    handleCambioInput(
-                                      index,
-                                      "nombreCompleto",
-                                      e.target.value,
-                                    )
-                                  }
+                                  onChange={(e) => handleCambioInput(index, "nombreCompleto", e.target.value)}
                                   className="w-full p-2 border border-sky-200 rounded outline-none focus:border-sky-400 text-sm"
                                   placeholder="Nombre completo"
                                 />
@@ -1932,7 +2072,7 @@ function App() {
                               <td className="p-2 text-center">
                                 <button
                                   onClick={() => eliminarFila(index)}
-                                  className="text-red-500 hover:text-red-700 p-2 bg-red-50 rounded-lg"
+                                  className="text-red-500 hover:text-red-700 p-2 bg-red-50 rounded-lg cursor-pointer"
                                 >
                                   🗑️
                                 </button>
@@ -2027,10 +2167,10 @@ function App() {
                     />
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* FECHA (INICIO) */}
+                    {/* FECHA INICIO (SIEMPRE VISIBLE) */}
                     <div>
                       <label className="block text-sm font-bold text-gray-700 mb-1">
-                        {formEvento.esMultiDia ? "Fecha Inicio" : "Fecha"}{" "}
+                        {formEvento.esMultiDia ? "Fecha Inicio" : "Fecha del Evento"}{" "}
                         <span className="text-red-500">*</span>
                       </label>
                       <input
@@ -2046,11 +2186,32 @@ function App() {
                         required
                       />
                     </div>
-                    {/* HORA (INICIO) */}
+
+                    {/* FECHA FIN (SOLO SI ES MULTIDÍA) */}
+                    {formEvento.esMultiDia && (
+                      <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-1">
+                          Fecha Fin <span className="text-red-500">*</span>
+                        </label>
+                        <input
+                          type="date"
+                          value={formEvento.fechaFin}
+                          onChange={(e) =>
+                            setFormEvento({
+                              ...formEvento,
+                              fechaFin: e.target.value,
+                            })
+                          }
+                          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+                          required={formEvento.esMultiDia}
+                        />
+                      </div>
+                    )}
+
+                    {/* HORA INICIO (SIEMPRE VISIBLE) */}
                     <div>
                       <label className="block text-sm font-bold text-gray-700 mb-1">
-                        {formEvento.esMultiDia ? "Hora Inicio" : "Hora"}{" "}
-                        <span className="text-red-500">*</span>
+                        Hora de Inicio <span className="text-red-500">*</span>
                       </label>
                       <input
                         type="time"
@@ -2063,47 +2224,26 @@ function App() {
                       />
                     </div>
 
-                    {/* FECHAS FINALES (SE MUESTRAN SOLO SI ES MULTI DÍA) */}
-                    {formEvento.esMultiDia && (
-                      <>
-                        <div>
-                          <label className="block text-sm font-bold text-gray-700 mb-1">
-                            Fecha Fin <span className="text-red-500">*</span>
-                          </label>
-                          <input
-                            type="date"
-                            value={formEvento.fechaFin}
-                            onChange={(e) =>
-                              setFormEvento({
-                                ...formEvento,
-                                fechaFin: e.target.value,
-                              })
-                            }
-                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                            required={formEvento.esMultiDia}
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-sm font-bold text-gray-700 mb-1">
-                            Hora Fin{" "}
-                            <span className="text-gray-400 font-normal">
-                              (Opcional)
-                            </span>
-                          </label>
-                          <input
-                            type="time"
-                            value={formEvento.horaFin}
-                            onChange={(e) =>
-                              setFormEvento({
-                                ...formEvento,
-                                horaFin: e.target.value,
-                              })
-                            }
-                            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                          />
-                        </div>
-                      </>
-                    )}
+                    {/* HORA FIN (SIEMPRE VISIBLE) */}
+                    <div>
+                      <label className="block text-sm font-bold text-gray-700 mb-1">
+                        Hora de Fin{" "}
+                        <span className="text-gray-400 font-normal">
+                          (Opcional)
+                        </span>
+                      </label>
+                      <input
+                        type="time"
+                        value={formEvento.horaFin}
+                        onChange={(e) =>
+                          setFormEvento({
+                            ...formEvento,
+                            horaFin: e.target.value,
+                          })
+                        }
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+                      />
+                    </div>
                   </div>
                   <div>
                     <label className="block text-sm font-bold text-gray-700 mb-1">
