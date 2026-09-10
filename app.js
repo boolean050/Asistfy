@@ -1763,7 +1763,7 @@ function App() {
                           disabled={cargando}
                           className="bg-purple-100 text-purple-700 border border-purple-200 hover:bg-purple-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
                         >
-                          🔮 Subir Lista Maestros
+                          Subir Lista Maestros
                         </button>
                         <label className="bg-green-100 text-green-700 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold cursor-pointer flex items-center shadow-sm transition-colors">
                           📂 Subir Excel
