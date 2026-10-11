@@ -141,6 +141,7 @@ function App() {
   const [mostrarModalQR, setMostrarModalQR] = useState(false);
   const [linkQRDinamico, setLinkQRDinamico] = useState("");
   const [confirmacionExitosa, setConfirmacionExitosa] = useState(false);
+  const [modalYaRegistrado, setModalYaRegistrado] = useState({ visible: false, dia: "", fecha: "", hora: "" });
 
   const [formEvento, setFormEvento] = useState({
     titulo: "",
@@ -753,9 +754,25 @@ function App() {
             .map((d) => Number(d))
             .includes(diaEscaneado)
         ) {
-          alert(
-            `⚠️ Ya habías confirmado tu asistencia para el DÍA ${diaEscaneado} de este evento.`,
-          );
+          // 1. Calculamos la hora exacta sacándola del timestamp de Firebase
+          let horaFirma = "Hora no disponible";
+          const timestamp = dataAnterior.ultimaFirma || dataAnterior.fechaFirma;
+          if (timestamp && timestamp.toDate) {
+            horaFirma = new Date(timestamp.toDate()).toLocaleTimeString("es-MX", { hour: '2-digit', minute: '2-digit' });
+          }
+          
+          // 2. Calculamos la fecha exacta de ese día del evento
+          const fechaExacta = obtenerFechaFormateada(eventoData.fecha, diaEscaneado - 1);
+          
+          // 3. Encendemos el popup
+          setModalYaRegistrado({
+            visible: true,
+            dia: diaEscaneado,
+            fecha: fechaExacta,
+            hora: horaFirma
+          });
+          setCargando(false);
+          return; // Detenemos la función aquí
         } else {
           // Si ya existía pero es un día nuevo, le sumamos el día al arreglo
           await docRef.update({
@@ -1720,6 +1737,41 @@ function App() {
                 </p>
               </div>
             )}
+          </div>
+        )}
+
+        {/* NUEVO MODAL: ASISTENCIA DUPLICADA */}
+        {modalYaRegistrado.visible && (
+          <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 text-center border-t-4 border-amber-500 transform scale-100 transition-all">
+              <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-amber-100 mb-4 shadow-inner text-3xl">
+                ⚠️
+              </div>
+              <h3 className="text-xl font-black text-gray-900 mb-2">Asistencia Duplicada</h3>
+              <p className="text-sm text-gray-600 mb-5 font-medium">
+                Ya habías registrado tu asistencia para este día previamente.
+              </p>
+              
+              <div className="bg-gray-50 rounded-xl p-4 mb-6 text-left border border-gray-200 shadow-inner">
+                <p className="text-sm text-gray-700 mb-2">📅 <strong>Día del evento:</strong> Día {modalYaRegistrado.dia}</p>
+                <p className="text-sm text-gray-700 mb-2">📆 <strong>Fecha:</strong> {modalYaRegistrado.fecha}</p>
+                <p className="text-sm text-gray-700">⏰ <strong>Hora de registro:</strong> {modalYaRegistrado.hora}</p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setModalYaRegistrado({ visible: false, dia: "", fecha: "", hora: "" });
+                  // Limpiamos la URL y la sesión para dejar listo el dispositivo
+                  window.history.replaceState({}, document.title, window.location.pathname);
+                  setQrEventoId(null);
+                  cerrarSesion();
+                }}
+                className="w-full inline-flex justify-center rounded-xl border border-transparent bg-amber-500 px-4 py-3 text-sm font-bold text-white hover:bg-amber-600 shadow-md transition-colors"
+              >
+                Entendido
+              </button>
+            </div>
           </div>
         )}
       </div>
