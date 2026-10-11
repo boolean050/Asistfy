@@ -1,5 +1,104 @@
 const { useState, useEffect } = React;
 
+// === COMPONENTE DINÁMICO DE ASISTENCIA PARA DOCENTES ===
+const BannerAsistenciaDinamico = ({ evento, numEmpleado }) => {
+  const [asistioHoy, setAsistioHoy] = useState(false);
+  const [horaRegistro, setHoraRegistro] = useState("");
+  // NUEVO: Estado para ocultar el parpadeo mientras lee Firebase
+  const [cargandoBanner, setCargandoBanner] = useState(true);
+
+  useEffect(() => {
+    if (!evento || !numEmpleado) return;
+
+    const calcularDiasEvento = (fechaInicio, fechaFin, esMultiDia) => {
+      if (!esMultiDia || !fechaFin || !fechaInicio) return 1;
+      const inicio = new Date(`${fechaInicio}T00:00:00`);
+      const fin = new Date(`${fechaFin}T00:00:00`);
+      const diferenciaMs = fin - inicio;
+      const dias = Math.ceil(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
+      return dias > 0 ? dias : 1;
+    };
+
+    const docIdUnico = `${evento.id}_${String(numEmpleado).trim()}`;
+    
+    const unsubscribe = db
+      .collection("asistencias")
+      .doc(docIdUnico)
+      .onSnapshot((docSnap) => {
+        if (docSnap.exists) {
+          const data = docSnap.data();
+          const fechaHoyLocal = new Date().toLocaleDateString("en-CA");
+          const diaDeHoyNumero = Number(
+            calcularDiasEvento(evento.fecha, fechaHoyLocal, evento.esMultiDia)
+          );
+
+          const diasAsistidos = data.diasAsistidos ? data.diasAsistidos.map(Number) : [];
+          
+          if (diasAsistidos.includes(diaDeHoyNumero)) {
+            setAsistioHoy(true);
+            const timestampFirma = data.ultimaFirma || data.fechaFirma;
+            if (timestampFirma) {
+              setHoraRegistro(new Date(timestampFirma.toDate()).toLocaleTimeString("es-MX", { hour: '2-digit', minute: '2-digit' }));
+            }
+          } else {
+            setAsistioHoy(false);
+          }
+        } else {
+          setAsistioHoy(false);
+        }
+        
+        // Apagamos la animación de carga en cuanto Firebase responde
+        setCargandoBanner(false);
+      });
+
+    return () => unsubscribe();
+  }, [evento, numEmpleado]);
+
+  const fechaVisual = new Date().toLocaleDateString("es-MX", { 
+    day: '2-digit', month: '2-digit', year: 'numeric' 
+  });
+
+  // 1. ESTADO DE CARGA (Evita el parpadeo)
+  if (cargandoBanner) {
+    return (
+      <div className="w-full bg-gray-50 p-4 rounded-xl border border-gray-200 text-center flex flex-col justify-center shadow-inner transition-all duration-300 animate-pulse">
+        <span className="font-semibold text-gray-400 text-sm mb-1">
+          Verificando registro del día...
+        </span>
+        <span className="font-black tracking-wide text-gray-300 drop-shadow-sm text-[0.90rem] sm:text-base">
+          CARGANDO
+        </span>
+      </div>
+    );
+  }
+
+  // 2. ESTADO VERDE (Ya asistió)
+  if (asistioHoy) {
+    return (
+      <div className="w-full bg-green-50 p-4 rounded-xl border border-green-200 text-center flex flex-col justify-center shadow-inner transition-all duration-300">
+        <span className="font-semibold text-green-800 text-sm mb-1">
+          Ya estás registrado en el día <strong>{fechaVisual}</strong>{horaRegistro ? ` a las ${horaRegistro}` : ""}.
+        </span>
+        <span className="font-black tracking-wide text-green-700 drop-shadow-sm text-[0.90rem] sm:text-base">
+          ¡TE ESPERAMOS EN EL EVENTO!
+        </span>
+      </div>
+    );
+  }
+
+  // 3. ESTADO NARANJA (Falta asistir)
+  return (
+    <div className="w-full bg-gradient-to-r from-amber-50 to-orange-50 p-4 rounded-xl border border-amber-200 text-center flex flex-col justify-center shadow-inner transition-all duration-300">
+      <span className="font-semibold text-gray-700 text-sm mb-1">
+        No has confirmado asistencia para el día <strong>{fechaVisual}</strong>.
+      </span>
+      <span className="font-black tracking-wide text-orange-600 drop-shadow-sm text-[0.90rem] sm:text-base">
+        FAVOR DE CONFIRMAR ASISTENCIA MEDIANTE EL QR ENVIADO
+      </span>
+    </div>
+  );
+};
+
 function App() {
   // === 1. DETECCIÓN DEL LINK DEL QR ===
   const urlParams = new URLSearchParams(window.location.search);
@@ -9,11 +108,14 @@ function App() {
   const [pantallaActual, setPantallaActual] = useState(() => {
     return sessionStorage.getItem("pantallaFime") || "validacion";
   });
-  const [numEmpleado, setNumEmpleado] = useState("");
+
+  const [mostrarPopupErrorFecha, setMostrarPopupErrorFecha] = useState(false);
+
+  const [numEmpleado, setNumEmpleado] = useState(() => sessionStorage.getItem("numEmpleadoFime") || "");
   const [error, setError] = useState("");
 
   const [cargando, setCargando] = useState(false);
-  const [nombreMaestro, setNombreMaestro] = useState("");
+  const [nombreMaestro, setNombreMaestro] = useState(() => sessionStorage.getItem("nombreMaestroFime") || "");
   const [menuAbierto, setMenuAbierto] = useState(false);
 
   const [esAdmin, setEsAdmin] = useState(() => {
@@ -54,6 +156,8 @@ function App() {
   });
   const [editandoEventoId, setEditandoEventoId] = useState(null);
 
+ 
+
   // NUEVO: ESTADOS PARA BUSCADORES Y DESCARGAS
   const [listaEventosInternos, setListaEventosInternos] = useState([]);
   const [busquedaMaestros, setBusquedaMaestros] = useState("");
@@ -64,6 +168,12 @@ function App() {
   const [modoSeleccionDescarga, setModoSeleccionDescarga] = useState(false);
   const [maestrosSeleccionados, setMaestrosSeleccionados] = useState([]);
   const [menuDescargaGeneralAbierto, setMenuDescargaGeneralAbierto] = useState(false);
+  
+
+  // === NUEVOS ESTADOS PARA AGREGAR MAESTRO MANUAL ===
+  const [mostrarModalAgregarMaestro, setMostrarModalAgregarMaestro] = useState(false);
+  const [formNuevoMaestro, setFormNuevoMaestro] = useState({ id: "", nombreCompleto: "" });
+  const [resaltarFechas, setResaltarFechas] = useState(false); // Para el efecto visual al clonar
 
   // === CÁLCULO DE DÍAS PARA EVENTOS MULTI-DÍA ===
   const calcularDiasEvento = (fechaInicio, fechaFin, esMultiDia) => {
@@ -78,7 +188,7 @@ function App() {
 
   // === NUEVO: CEREBRO DEL TIEMPO (CADUCIDAD Y AUTODESTRUCCIÓN) ===
   const esEventoCaducado = (evento) => {
-    if (!evento.fecha) return false;
+  if (!evento || !evento.fecha) return false;
     const fechaRef =
       evento.esMultiDia && evento.fechaFin ? evento.fechaFin : evento.fecha;
     // CORRECCIÓN: Ya NO toma evento.hora. Si no hay hora fin, se va hasta las 23:59.
@@ -88,7 +198,7 @@ function App() {
   };
 
   const diasParaEliminacion = (evento) => {
-    if (!evento.fecha) return 15;
+    if (!evento || !evento.fecha) return 7;
     const fechaRef =
       evento.esMultiDia && evento.fechaFin ? evento.fechaFin : evento.fecha;
     // CORRECCIÓN: Ya NO toma evento.hora. Si no hay hora fin, se va hasta las 23:59.
@@ -96,7 +206,7 @@ function App() {
     const limite = new Date(`${fechaRef}T${horaRef}:00`);
     const diferenciaMs = new Date() - limite;
     const diasPasados = Math.floor(diferenciaMs / (1000 * 60 * 60 * 24));
-    return Math.max(15 - diasPasados, 0);
+    return Math.max(7 - diasPasados, 0);
   };
 
   // === NUEVO: TRADUCTOR DE FECHAS (EJ. 2026-Ago-22) ===
@@ -162,33 +272,95 @@ function App() {
     }
   };
 
+  
+
+  // 1. FUNCIÓN PARA AGREGAR MAESTRO MANUAL (Reemplazo del botón morado)
+  const agregarMaestroManualEvento = async (e) => {
+    e.preventDefault();
+    if (!formNuevoMaestro.id || !formNuevoMaestro.nombreCompleto) return;
+    setCargando(true);
+
+    try {
+      const idLimpio = String(formNuevoMaestro.id).trim();
+      const nombreLimpio = formNuevoMaestro.nombreCompleto.trim();
+
+      const dirRef = db.collection("directorio_fime").doc(idLimpio);
+      await dirRef.set({ nombreCompleto: nombreLimpio, registrado: true }, { merge: true });
+
+      const docIdUnico = `${eventoSeleccionado.id}_${idLimpio}`;
+      const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
+      await preAsisRef.set({
+        eventoId: eventoSeleccionado.id,
+        numEmpleado: idLimpio,
+        nombreMaestro: nombreLimpio,
+        fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
+      });
+
+      setPreRegistradosEvento((prev) => [...new Set([...(prev || []), idLimpio])]);
+      setMostrarModalAgregarMaestro(false);
+      setFormNuevoMaestro({ id: "", nombreCompleto: "" });
+      alert("✅ Maestro agregado correctamente a la lista.");
+    } catch (error) {
+      console.error(error);
+      alert("❌ Error al agregar maestro.");
+    }
+    setCargando(false);
+  };
+
+  const prepararReutilizacionEvento = async (eventoViejo) => {
+    setCargando(true);
+    try {
+      // CORRECCIÓN: Eliminado el 'db.collection(...).doc(...).delete()'
+      // Solo preparamos los datos clonados en el formulario, añadiendo "(Copia)" al nombre
+      setFormEvento({
+        titulo: eventoViejo.titulo ? `${eventoViejo.titulo} (Copia)` : "",
+        descripcion: eventoViejo.descripcion || "",
+        fecha: "", 
+        fechaFin: "",
+        hora: eventoViejo.hora || "",
+        horaFin: eventoViejo.horaFin || "",
+        portada: eventoViejo.portada || "",
+        esMultiDia: eventoViejo.esMultiDia || false,
+        tipo: eventoViejo.tipo || "publico",
+      });
+      
+      setEditandoEventoId(null); // NULL asegura que Firebase asigne un ID completamente nuevo
+      
+      setResaltarFechas(true);
+      setTimeout(() => setResaltarFechas(false), 5000);
+      setPantallaActual("registrar_evento");
+
+    } catch (error) {
+      console.error("Error al clonar el evento:", error);
+      alert("⚠️ Hubo un error de conexión al intentar clonar el evento.");
+    } finally {
+      setCargando(false);
+    }
+  };
+
   // === EFECTOS DE GUARDADO Y CARGA INICIAL ===
   useEffect(() => {
     sessionStorage.setItem("pantallaFime", pantallaActual);
     sessionStorage.setItem("esAdminFime", esAdmin);
-  }, [pantallaActual, esAdmin]);
+    sessionStorage.setItem("numEmpleadoFime", numEmpleado);
+    sessionStorage.setItem("nombreMaestroFime", nombreMaestro);
+  }, [pantallaActual, esAdmin, numEmpleado, nombreMaestro]);
 
   useEffect(() => {
-    if (pantallaActual === "admin_eventos") {
-      obtenerEventos("publico");
-    } else if (pantallaActual === "admin_eventos_internos") {
-      obtenerEventos("interno");
-    } else if (pantallaActual === "eventos") {
-      // MAGIA: A los mortales les descargamos ambas colecciones
-      obtenerEventos("publico");
-      obtenerEventos("interno");
-    }
+    // CARGA INMEDIATA: Sin importar si recargas en eventos, historial o admin, descargamos ambas bases de datos al instante
+    obtenerEventos("publico");
+    obtenerEventos("interno");
 
-    // BLINDAJE: Cargamos a los maestros también en el Historial para que nunca aparezca en blanco
-          if (
-            esAdmin &&
-            (pantallaActual === "admin_maestros" ||
-              pantallaActual === "admin_asistencia_evento" ||
-              pantallaActual === "eventos_recientes" ||
-              pantallaActual === "detalle_evento")
-          ) {
-            obtenerMaestros();
-          }
+    // BLINDAJE: Cargamos a los maestros cuando se necesite
+    if (
+      esAdmin &&
+      (pantallaActual === "admin_maestros" ||
+        pantallaActual === "admin_asistencia_evento" ||
+        pantallaActual === "eventos_recientes" ||
+        pantallaActual === "detalle_evento")
+    ) {
+      obtenerMaestros();
+    }
   }, [pantallaActual, esAdmin]);
 
   // === EFECTOS EN TIEMPO REAL (ADIÓS AL F5 Y RETRASOS) ===
@@ -495,10 +667,8 @@ function App() {
     }
   };
 
-  //Funcion para cerrar sesion si se sale de la pgaina y no se almacena la sesion  de froma local
   const cerrarSesion = () => {
-    sessionStorage.removeItem("pantallaFime");
-    sessionStorage.removeItem("esAdminFime");
+    sessionStorage.clear();
     setPantallaActual("validacion");
     setNumEmpleado("");
     setNombreMaestro("");
@@ -515,6 +685,7 @@ function App() {
     setModoEdicion(false);
     setEditandoEventoId(null);
     setMostrarPopup(false);
+    setResaltarFechas(false); // NUEVO
   };
 
   // ==========================================
@@ -689,30 +860,151 @@ function App() {
   };
   const agregarFila = () => {
     setCambiosDirectorio([
-      ...cambiosDirectorio,
-      { id: "", nombreCompleto: "", trayectoria: "", registrado: false },
+      { id: "", nombreCompleto: "", trayectoria: "", registrado: false }, // La fila vacía va al inicio
+      ...cambiosDirectorio, // Y después todo lo que ya existía
     ]);
   };
-  const eliminarFila = (index) => {
-    const nuevaLista = [...cambiosDirectorio];
-    nuevaLista.splice(index, 1);
-    setCambiosDirectorio(nuevaLista);
+  const eliminarFila = async (index) => {
+    const maestroAEliminar = cambiosDirectorio[index];
+
+    // Si es una fila nueva vacía que aún no se guarda en BD, solo la quitamos de la pantalla
+    if (!maestroAEliminar.id || maestroAEliminar.id.trim() === "") {
+      const nuevaLista = [...cambiosDirectorio];
+      nuevaLista.splice(index, 1);
+      setCambiosDirectorio(nuevaLista);
+      return;
+    }
+
+    const confirmacion = window.confirm(
+      `⚠️ ¿Estás seguro de eliminar PERMANENTEMENTE a ${maestroAEliminar.nombreCompleto || maestroAEliminar.id}?\n\nEsto borrará de inmediato todo su historial, asistencias y registros en TODOS los eventos. Esta acción NO se puede deshacer.`
+    );
+    if (!confirmacion) return;
+
+    setCargando(true);
+    try {
+      const idLimpio = String(maestroAEliminar.id).trim();
+
+      // 1. Borrar del directorio general
+      await db.collection("directorio_fime").doc(idLimpio).delete();
+
+      // 2. Borrar pre-asistencias (búsqueda y destrucción)
+      const preSnap = await db.collection("pre_asistencias").where("numEmpleado", "==", idLimpio).get();
+      const batchPre = db.batch();
+      preSnap.docs.forEach(doc => batchPre.delete(doc.ref));
+      await batchPre.commit();
+
+      // 3. Borrar firmas de asistencias finales
+      const asisSnap = await db.collection("asistencias").where("numEmpleado", "==", idLimpio).get();
+      const batchAsis = db.batch();
+      asisSnap.docs.forEach(doc => batchAsis.delete(doc.ref));
+      await batchAsis.commit();
+
+      // 4. Actualizar las tablas visuales
+      const nuevaLista = [...cambiosDirectorio];
+      nuevaLista.splice(index, 1);
+      setCambiosDirectorio(nuevaLista);
+      
+      // También quitamos al maestro de la lista oficial para que no reviva si le dan a cancelar
+      setListaDirectorio((prev) => prev.filter(m => String(m.id).trim() !== idLimpio));
+
+      alert("🗑️ Maestro y todos sus registros han sido eliminados permanentemente.");
+    } catch (error) {
+      console.error(error);
+      alert("❌ Error al intentar eliminar al maestro de la base de datos.");
+    }
+    setCargando(false);
   };
+      
+  // === NUEVO: LIMPIADOR PROFUNDO DE BASE DE DATOS ===
+  const sanitizarBaseDeDatos = async () => {
+    const confirmacion = window.confirm(
+      "⚠️ ¿Estás seguro de sanitizar la base de datos?\n\nEsto buscará y eliminará permanentemente de TODOS los eventos a cualquier maestro que ya no exista en tu Lista de Registro.\n\nEsta acción no se puede deshacer.",
+    );
+    if (!confirmacion) return;
+
+    setCargando(true);
+    try {
+      // 1. Obtener la lista maestra de IDs válidos
+      const dirSnap = await db.collection("directorio_fime").get();
+      const idsValidos = dirSnap.docs.map((doc) => String(doc.id).trim());
+
+      let eliminadosCount = 0;
+      const promesasBorrado = [];
+
+      // 2. Rastrear en pre-asistencias
+      const preSnap = await db.collection("pre_asistencias").get();
+      preSnap.docs.forEach((doc) => {
+        const numEmp = String(doc.data().numEmpleado).trim();
+        if (!idsValidos.includes(numEmp)) {
+          promesasBorrado.push(doc.ref.delete());
+          eliminadosCount++;
+        }
+      });
+
+      // 3. Rastrear en asistencias (firmas finales)
+      const asisSnap = await db.collection("asistencias").get();
+      asisSnap.docs.forEach((doc) => {
+        const numEmp = String(doc.data().numEmpleado).trim();
+        if (!idsValidos.includes(numEmp)) {
+          promesasBorrado.push(doc.ref.delete());
+          eliminadosCount++;
+        }
+      });
+
+      // Ejecutar la destrucción masiva
+      await Promise.all(promesasBorrado);
+
+      alert(`✅ Sanitización completa. Se eliminaron ${eliminadosCount} registros fantasma de maestros que ya no están en el directorio.`);
+    } catch (error) {
+      console.error(error);
+      alert("❌ Error al intentar sanitizar la base de datos.");
+    }
+    setCargando(false);
+  };
+
 
   const guardarCambios = async () => {
     setCargando(true);
     try {
-      const batch = db.batch();
       const eliminados = listaDirectorio.filter(
         (orig) => !cambiosDirectorio.some((c) => c.id === orig.id),
       );
+
+      // NUEVO: Promesas para borrar el rastro de los eliminados en todos lados sin saturar el Batch
+      const promesasLimpieza = [];
+
       eliminados.forEach((emp) => {
-        batch.delete(db.collection("directorio_fime").doc(emp.id));
+        const idLimpio = String(emp.id).trim();
+        promesasLimpieza.push(db.collection("directorio_fime").doc(idLimpio).delete());
+
+        // Buscar y destruir en pre_asistencias
+        const p1 = db.collection("pre_asistencias").where("numEmpleado", "==", idLimpio).get().then(snap => {
+          const batchBorrado = db.batch();
+          snap.docs.forEach(d => batchBorrado.delete(d.ref));
+          return batchBorrado.commit();
+        });
+
+        // Buscar y destruir en asistencias
+        const p2 = db.collection("asistencias").where("numEmpleado", "==", idLimpio).get().then(snap => {
+          const batchBorrado = db.batch();
+          snap.docs.forEach(d => batchBorrado.delete(d.ref));
+          return batchBorrado.commit();
+        });
+
+        promesasLimpieza.push(p1, p2);
       });
-      cambiosDirectorio.forEach((emp) => {
-        if (emp.id && emp.id.trim() !== "") {
+
+      // CORRECCIÓN VITAL: Dividimos el guardado en lotes (Chunks) de 490 para evitar el colapso de Firebase
+      const CHUNK_SIZE = 490;
+      const maestrosValidos = cambiosDirectorio.filter(emp => emp.id && emp.id.trim() !== "");
+
+      for (let i = 0; i < maestrosValidos.length; i += CHUNK_SIZE) {
+        const chunk = maestrosValidos.slice(i, i + CHUNK_SIZE);
+        const batchGuardado = db.batch();
+
+        chunk.forEach((emp) => {
           const docRef = db.collection("directorio_fime").doc(emp.id.trim());
-          batch.set(
+          batchGuardado.set(
             docRef,
             {
               nombreCompleto: emp.nombreCompleto,
@@ -721,12 +1013,15 @@ function App() {
             },
             { merge: true },
           );
-        }
-      });
-      await batch.commit();
+        });
+        await batchGuardado.commit();
+      }
+      
+      await Promise.all(promesasLimpieza); // Esperamos a que borre toda la basura
+
       setListaDirectorio(cambiosDirectorio);
       setModoEdicion(false);
-      alert("✅ Cambios guardados con éxito.");
+      alert("✅ Cambios guardados y base de datos limpia con éxito.");
     } catch (err) {
       alert("❌ Error al guardar: " + err.message);
     }
@@ -735,10 +1030,33 @@ function App() {
 
   const guardarEvento = async (e) => {
     e.preventDefault();
-    // NUEVA VALIDACIÓN: Exigimos título, fecha y descripción
     if (!formEvento.titulo || !formEvento.fecha || !formEvento.descripcion) {
       alert("Por favor completa el título, la fecha y la descripción corta.");
       return;
+    }
+
+    // === VALIDADOR ESTRICTO DE TIEMPO ===
+    // 1. Evaluamos SIEMPRE la fecha de INICIO, no la de fin
+    const horaEvaluar = formEvento.hora || "23:59";
+    
+    // Creamos objetos de tiempo real para evitar errores
+    const fechaInicioIngresada = new Date(`${formEvento.fecha}T${horaEvaluar}:00`);
+    const fechaActual = new Date();
+
+    // Si la fecha de inicio ya pasó (ya sea el día o la hora de hoy)
+    // CORRECCIÓN: Si estamos editando (!editandoEventoId es falso), ignoramos el bloqueo de tiempo pasado.
+    if (!editandoEventoId && fechaInicioIngresada < fechaActual) {
+      setMostrarPopupErrorFecha(true);
+      return;
+    }
+
+    // 2. BLINDAJE EXTRA PARA EVENTOS MULTIDÍA
+    if (formEvento.esMultiDia && formEvento.fechaFin) {
+      const fechaFinIngresada = new Date(`${formEvento.fechaFin}T23:59:00`);
+      if (fechaFinIngresada < new Date(`${formEvento.fecha}T00:00:00`)) {
+        alert("⚠️ La fecha de término no puede ser anterior a la fecha de inicio.");
+        return;
+      }
     }
     if (editandoEventoId) {
       const confirmacion = window.confirm(
@@ -918,7 +1236,6 @@ function App() {
     setMaestrosSeleccionados([]);
   };
 
-  // === NUEVA FUNCIÓN: AUTO-CARGAR A TODO EL DIRECTORIO (BOTÓN LILA) ===
   const cargarTodosLosMaestrosEventoInterno = async () => {
     if (!eventoSeleccionado) return;
     const confirmacion = window.confirm("¿Estás seguro de registrar a TODOS los maestros del directorio general en este evento?");
@@ -926,24 +1243,29 @@ function App() {
 
     setCargando(true);
     try {
-      const batch = db.batch();
       const numEmpleadosNuevos = [];
+      const CHUNK_SIZE = 490; // Salvavidas de Firebase
 
-      listaDirectorio.forEach((maestro) => {
-        const idLimpio = String(maestro.id).trim();
-        const docIdUnico = `${eventoSeleccionado.id}_${idLimpio}`;
-        const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
+      for (let i = 0; i < listaDirectorio.length; i += CHUNK_SIZE) {
+        const chunk = listaDirectorio.slice(i, i + CHUNK_SIZE);
+        const batch = db.batch();
 
-        batch.set(preAsisRef, {
-          eventoId: eventoSeleccionado.id,
-          numEmpleado: idLimpio,
-          nombreMaestro: maestro.nombreCompleto,
-          fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
+        chunk.forEach((maestro) => {
+          const idLimpio = String(maestro.id).trim();
+          const docIdUnico = `${eventoSeleccionado.id}_${idLimpio}`;
+          const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
+
+          batch.set(preAsisRef, {
+            eventoId: eventoSeleccionado.id,
+            numEmpleado: idLimpio,
+            nombreMaestro: maestro.nombreCompleto,
+            fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
+          });
+          numEmpleadosNuevos.push(idLimpio);
         });
-        numEmpleadosNuevos.push(idLimpio);
-      });
+        await batch.commit(); // Subimos el bloque actual y pasamos al siguiente
+      }
 
-      await batch.commit();
       setPreRegistradosEvento((prev) => [...new Set([...(prev || []), ...numEmpleadosNuevos])]);
       alert(`✅ Carga masiva exitosa. Se registraron ${listaDirectorio.length} maestros en el evento.`);
     } catch (error) {
@@ -1105,9 +1427,7 @@ function App() {
     const file = e.target.files[0];
     if (!file) return;
     if (file.name.endsWith(".pdf")) {
-      alert(
-        "⚠️ Sube un archivo Excel (.xlsx) para garantizar que los números se vinculen correctamente.",
-      );
+      alert("⚠️ Sube un archivo Excel (.xlsx) para garantizar que los números se vinculen correctamente.");
       return;
     }
 
@@ -1120,23 +1440,13 @@ function App() {
         const wb = XLSX.read(bstr, { type: "binary" });
         const wsname = wb.SheetNames[0];
 
-        // LEEMOS COMO MATRIZ (Arreglo de arreglos) PARA NO DEPENDER DE LA FILA 1
-        const filas = XLSX.utils.sheet_to_json(wb.Sheets[wsname], {
-          header: 1,
-        });
-        const batch = db.batch();
+        const filas = XLSX.utils.sheet_to_json(wb.Sheets[wsname], { header: 1 });
         let agregados = 0;
         const numEmpleadosNuevos = [];
 
-        // Función ninja para limpiar acentos y espacios extra
         const normalizar = (texto) =>
-          String(texto)
-            .toLowerCase()
-            .normalize("NFD")
-            .replace(/[\u0300-\u036f]/g, "")
-            .trim();
+          String(texto).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
 
-        // 1. EL ESCÁNER: Buscamos en las primeras 10 filas dónde están los encabezados
         let idxFilaTitulos = -1;
         let idxColEmp = -1;
         let idxColNom = -1;
@@ -1145,24 +1455,9 @@ function App() {
           const fila = filas[i];
           if (!fila || fila.length === 0) continue;
 
-          // Buscamos algo que suene a empleado o matrícula
-          idxColEmp = fila.findIndex(
-            (celda) =>
-              celda &&
-              (normalizar(celda).includes("empleado") ||
-                normalizar(celda).includes("matricula") ||
-                normalizar(celda).includes("emp")),
-          );
-          // Buscamos algo que suene a nombre
-          idxColNom = fila.findIndex(
-            (celda) =>
-              celda &&
-              (normalizar(celda).includes("nombre") ||
-                normalizar(celda).includes("docente") ||
-                normalizar(celda).includes("maestro")),
-          );
+          idxColEmp = fila.findIndex((celda) => celda && (normalizar(celda).includes("empleado") || normalizar(celda).includes("matricula") || normalizar(celda).includes("emp")));
+          idxColNom = fila.findIndex((celda) => celda && (normalizar(celda).includes("nombre") || normalizar(celda).includes("docente") || normalizar(celda).includes("maestro")));
 
-          // Si encontró ambas columnas en esta fila, ¡bingo!
           if (idxColEmp !== -1 && idxColNom !== -1) {
             idxFilaTitulos = i;
             break;
@@ -1170,70 +1465,57 @@ function App() {
         }
 
         if (idxFilaTitulos === -1) {
-          alert(
-            "⚠️ El sistema no pudo encontrar las columnas de 'No. Empleado' y 'Nombre' en tu archivo. Verifica el Excel.",
-          );
+          alert("⚠️ El sistema no pudo encontrar las columnas de 'No. Empleado' y 'Nombre'.");
           setCargando(false);
           e.target.value = null;
           return;
         }
 
-        // 2. EXTRAER DATOS: Empezamos a leer desde la fila SIGUIENTE a los títulos
+        // CORRECCIÓN: Separamos los datos a subir en un arreglo temporal
+        const datosExtraidos = [];
         for (let i = idxFilaTitulos + 1; i < filas.length; i++) {
-          const fila = filas[i];
-          const numEmpRaw = fila[idxColEmp];
-          const nombreRaw = fila[idxColNom];
+          const numEmpRaw = filas[i][idxColEmp];
+          const nombreRaw = filas[i][idxColNom];
 
-          // Verificamos que la celda de empleado tenga datos reales
-          if (
-            numEmpRaw !== undefined &&
-            numEmpRaw !== null &&
-            String(numEmpRaw).trim() !== ""
-          ) {
-            const numEmpStr = String(numEmpRaw).trim();
-            const nombreDocente = nombreRaw
-              ? String(nombreRaw).trim()
-              : "SIN NOMBRE";
+          if (numEmpRaw !== undefined && numEmpRaw !== null && String(numEmpRaw).trim() !== "") {
+            datosExtraidos.push({
+              numEmpStr: String(numEmpRaw).trim(),
+              nombreDocente: nombreRaw ? String(nombreRaw).trim() : "SIN NOMBRE"
+            });
+          }
+        }
 
-            // Guardamos en directorio general
+        // CORRECCIÓN: Procesamos en Lotes (Batches) de 490 para no romper el límite de Firebase
+        const CHUNK_SIZE = 490;
+        for (let i = 0; i < datosExtraidos.length; i += CHUNK_SIZE) {
+          const chunk = datosExtraidos.slice(i, i + CHUNK_SIZE);
+          const batch = db.batch();
+
+          chunk.forEach(({ numEmpStr, nombreDocente }) => {
             const docRef = db.collection("directorio_fime").doc(numEmpStr);
-            batch.set(
-              docRef,
-              { nombreCompleto: nombreDocente, registrado: true },
-              { merge: true },
-            );
+            batch.set(docRef, { nombreCompleto: nombreDocente, registrado: true }, { merge: true });
 
-            // Inscribimos al evento interno
             if (eventoSeleccionado) {
               const docIdUnico = `${eventoSeleccionado.id}_${numEmpStr}`;
-              const preAsisRef = db
-                .collection("pre_asistencias")
-                .doc(docIdUnico);
+              const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
               batch.set(preAsisRef, {
                 eventoId: eventoSeleccionado.id,
                 numEmpleado: numEmpStr,
                 nombreMaestro: nombreDocente,
                 fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
               });
-
               numEmpleadosNuevos.push(numEmpStr);
             }
             agregados++;
-          }
+          });
+          await batch.commit(); // Subimos el lote actual
         }
 
-        await batch.commit();
-
-        // Actualizamos la tabla visual al instante
         if (eventoSeleccionado) {
-          setPreRegistradosEvento((prev) => [
-            ...new Set([...(prev || []), ...numEmpleadosNuevos]),
-          ]);
+          setPreRegistradosEvento((prev) => [...new Set([...(prev || []), ...numEmpleadosNuevos])]);
         }
 
-        alert(
-          `✅ Carga exitosa. Se detectaron y registraron ${agregados} maestros.`,
-        );
+        alert(`✅ Carga exitosa. Se detectaron y registraron ${agregados} maestros.`);
         obtenerMaestros();
       } catch (error) {
         console.error(error);
@@ -1243,7 +1525,6 @@ function App() {
         e.target.value = null;
       }
     };
-
     reader.readAsBinaryString(file);
   };
 
@@ -1261,11 +1542,16 @@ function App() {
         .get();
 
       if (!snapshotPre.empty) {
-        const batch = db.batch();
-        snapshotPre.docs.forEach((doc) => {
-          batch.delete(doc.ref);
-        });
-        await batch.commit();
+        const CHUNK_SIZE = 490;
+        for (let i = 0; i < snapshotPre.docs.length; i += CHUNK_SIZE) {
+          const chunk = snapshotPre.docs.slice(i, i + CHUNK_SIZE);
+          const batch = db.batch();
+          
+          chunk.forEach((doc) => {
+            batch.delete(doc.ref);
+          });
+          await batch.commit();
+        }
       }
 
       // Vaciamos la memoria visual al instante
@@ -1309,7 +1595,7 @@ function App() {
           <div className="bg-white p-8 rounded-xl shadow-lg w-full max-w-md border-t-8 border-fime-main relative">
             {qrEventoId && (
               <div className="absolute -top-4 right-0 left-0 mx-auto w-max bg-yellow-400 text-yellow-900 text-xs font-bold px-3 py-1 rounded-full shadow">
-                Modo Asistencia Rápida Activado 📷
+                Mode:Asistencia Rápida ⚡
               </div>
             )}
             <div className="text-center mb-8">
@@ -1731,7 +2017,7 @@ function App() {
               </div>
             )}
 
-          {pantallaActual === "admin_asistencia_evento" && esAdmin && (
+          {pantallaActual === "admin_asistencia_evento" && esAdmin && eventoSeleccionado && (
             <div className="flex flex-col h-full">
               <div className="flex justify-between items-center mb-6">
                 <div>
@@ -1754,36 +2040,40 @@ function App() {
                   </h2>
                 </div>
                 <div className="flex gap-2 relative">
-                  {/* CONDICIÓN: SUBIR EXCEL VS ELIMINAR EXCEL */}
                   {eventoSeleccionado?.tipo === "interno" && !esEventoCaducado(eventoSeleccionado) && (
-                    !preRegistradosEvento || preRegistradosEvento.length === 0 ? (
-                      <div className="flex gap-2">
-                        <button 
-                          onClick={cargarTodosLosMaestrosEventoInterno}
-                          disabled={cargando}
-                          className="bg-purple-100 text-purple-700 border border-purple-200 hover:bg-purple-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
-                        >
-                          Subir Lista Maestros
-                        </button>
-                        <label className="bg-green-100 text-green-700 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold cursor-pointer flex items-center shadow-sm transition-colors">
-                          📂 Subir Excel
-                          <input
-                            type="file"
-                            accept=".xlsx, .xls"
-                            className="hidden"
-                            onChange={procesarArchivoLista}
-                          />
-                        </label>
-                      </div>
-                    ) : (
+                    <div className="flex flex-wrap gap-2">
                       <button
-                        onClick={eliminarExcelCargado}
-                        disabled={cargando}
-                        className="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
+                        onClick={() => setMostrarModalAgregarMaestro(true)}
+                        className="bg-purple-100 text-purple-700 border border-purple-200 hover:bg-purple-200 px-3 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
                       >
-                        🗑️ Eliminar Excel
+                        ➕ Maestro Manual
                       </button>
-                    )
+                      <button
+                        onClick={cargarTodosLosMaestrosEventoInterno}
+                        disabled={cargando}
+                        className="bg-indigo-100 text-indigo-700 border border-indigo-200 hover:bg-indigo-200 px-3 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
+                      >
+                        👥 Cargar Todos
+                      </button>
+                      <label className="bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 px-3 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center cursor-pointer">
+                        <span>📁 Subir Excel</span>
+                        <input
+                          type="file"
+                          accept=".xlsx, .xls"
+                          onChange={procesarArchivoLista}
+                          className="hidden"
+                        />
+                      </label>
+                      {preRegistradosEvento && preRegistradosEvento.length > 0 && (
+                        <button
+                          onClick={eliminarExcelCargado}
+                          disabled={cargando}
+                          className="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 px-3 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
+                        >
+                          🗑️ Vaciar
+                        </button>
+                      )}
+                    </div>
                   )}
 
                   <div className="relative">
@@ -1928,6 +2218,58 @@ function App() {
             </div>
           )}
 
+        
+        {mostrarModalAgregarMaestro && (
+  <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
+    <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 transform transition-all">
+      <h3 className="text-xl font-extrabold text-gray-800 mb-4 text-center">
+        Agregar Maestro Manual
+      </h3>
+      <form onSubmit={agregarMaestroManualEvento} className="space-y-4">
+        <div>
+          <label className="block text-sm font-bold text-gray-700 mb-1">No. Empleado</label>
+          <input
+            type="text"
+            value={formNuevoMaestro.id}
+            onChange={(e) => setFormNuevoMaestro({ ...formNuevoMaestro, id: e.target.value })}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-400 outline-none"
+            placeholder="Ej. 123456"
+            required
+          />
+        </div>
+        <div>
+          <label className="block text-sm font-bold text-gray-700 mb-1">Nombre Completo</label>
+          <input
+            type="text"
+            value={formNuevoMaestro.nombreCompleto}
+            onChange={(e) => setFormNuevoMaestro({ ...formNuevoMaestro, nombreCompleto: e.target.value })}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-400 outline-none"
+            placeholder="Nombre del docente"
+            required
+          />
+        </div>
+        <div className="flex gap-3 pt-2">
+          <button
+            type="button"
+            onClick={() => setMostrarModalAgregarMaestro(false)}
+            className="flex-1 bg-gray-200 text-gray-700 py-2 rounded-lg font-bold hover:bg-gray-300 transition-colors"
+          >
+            Cancelar
+          </button>
+          <button
+            type="submit"
+            disabled={cargando}
+            className="flex-1 bg-purple-600 text-white py-2 rounded-lg font-bold hover:bg-purple-700 transition-colors"
+          >
+            {cargando ? "Guardando..." : "Guardar"}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
+)}
+
+
           {pantallaActual === "admin_maestros" && esAdmin && (
             <div className="flex flex-col h-full">
               <div className="flex justify-between items-center mb-6">
@@ -1955,6 +2297,15 @@ function App() {
                   </div>
                 ) : (
                   <div className="flex space-x-3 relative">
+                    {/* BOTÓN NUEVO DE SANITIZACIÓN */}
+                    <button 
+                      onClick={sanitizarBaseDeDatos} 
+                      disabled={cargando} 
+                      className="bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-red-100 flex items-center gap-2 transition-colors"
+                    >
+                      {cargando ? "🧹 Limpiando..." : "🧹 Sanitizar BD"}
+                    </button>
+                    
                     <div>
                       <button onClick={() => setMenuDescargaGeneralAbierto(!menuDescargaGeneralAbierto)} className="bg-green-600 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-green-700 flex items-center gap-2">
                         📥 Descargar Excel ▼
@@ -1989,6 +2340,17 @@ function App() {
               <div
                 className={`bg-white rounded-xl shadow-sm border flex-1 flex flex-col ${modoEdicion ? "border-sky-300 ring-2 ring-sky-100" : "border-gray-200"}`}
               >
+                {/* BOTÓN MOVIDO A LA PARTE SUPERIOR */}
+                {modoEdicion && (
+                  <div className="p-4 border-b border-gray-100 bg-sky-50/30 flex justify-start">
+                    <button
+                      onClick={agregarFila}
+                      className="text-sky-600 font-bold text-sm bg-sky-100 hover:bg-sky-200 px-5 py-2 rounded-lg transition-colors shadow-sm flex items-center gap-2"
+                    >
+                      ➕ Agregar Maestro
+                    </button>
+                  </div>
+                )}
                 <div className="overflow-x-auto">
                   <table className="w-full text-left border-collapse">
                     <thead>
@@ -2083,16 +2445,6 @@ function App() {
                     </tbody>
                   </table>
                 </div>
-                {modoEdicion && (
-                  <div className="p-4 border-t border-gray-100 bg-gray-50 text-center">
-                    <button
-                      onClick={agregarFila}
-                      className="text-sky-600 font-bold text-sm bg-sky-100 hover:bg-sky-200 px-4 py-2 rounded-lg transition-colors"
-                    >
-                      ➕ Agregar Maestro
-                    </button>
-                  </div>
-                )}
               </div>
             </div>
           )}
@@ -2117,224 +2469,185 @@ function App() {
                 </button>
               </div>
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-6 md:p-8">
-                <form onSubmit={guardarEvento} className="space-y-5">
-                  {/* NUEVO: SELECTOR DE DURACIÓN (SOLO EVENTOS INTERNOS) */}
-                  {formEvento.tipo === "interno" && (
-                    <div className="bg-sky-50 p-4 rounded-xl border border-sky-100 mb-2">
-                      <label className="block text-sm font-bold text-gray-700 mb-3 text-center">
-                        ¿Cuál es la duración de esta reunión?
-                      </label>
-                      <div className="flex justify-center gap-3">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setFormEvento({
-                              ...formEvento,
-                              esMultiDia: false,
-                              fechaFin: "",
-                              horaFin: "",
-                            })
-                          }
-                          className={`px-5 py-2 rounded-lg font-bold text-sm transition-all ${!formEvento.esMultiDia ? "bg-sky-600 text-white shadow-md" : "bg-white text-gray-500 border border-gray-200 hover:bg-gray-50"}`}
-                        >
-                          📅 Único Día
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setFormEvento({ ...formEvento, esMultiDia: true })
-                          }
-                          className={`px-5 py-2 rounded-lg font-bold text-sm transition-all ${formEvento.esMultiDia ? "bg-sky-600 text-white shadow-md" : "bg-white text-gray-500 border border-gray-200 hover:bg-gray-50"}`}
-                        >
-                          🗓️ Varios Días
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">
-                      Título del Evento <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={formEvento.titulo}
-                      onChange={(e) =>
-                        setFormEvento({ ...formEvento, titulo: e.target.value })
-                      }
-                      placeholder="Ej. Junta de Academia"
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                      required
-                    />
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* FECHA INICIO (SIEMPRE VISIBLE) */}
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1">
-                        {formEvento.esMultiDia ? "Fecha Inicio" : "Fecha del Evento"}{" "}
-                        <span className="text-red-500">*</span>
-                      </label>
-                      <input
-                        type="date"
-                        value={formEvento.fecha}
-                        onChange={(e) =>
-                          setFormEvento({
-                            ...formEvento,
-                            fecha: e.target.value,
-                          })
-                        }
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                        required
-                      />
-                    </div>
+  <form onSubmit={guardarEvento} className="space-y-5">
+    {/* SELECTOR DE DURACIÓN (CON BRILLO AL CLONAR) */}
+    {formEvento.tipo === "interno" && (
+      <div className={`p-4 rounded-xl border transition-all mb-2 ${resaltarFechas ? "bg-orange-50 border-orange-400 ring-4 ring-orange-400 animate-pulse shadow-lg" : "bg-sky-50 border-sky-100"}`}>
+        <label className="block text-sm font-bold text-gray-700 mb-3 text-center">
+          ¿Cuál es la duración de esta reunión?
+        </label>
+        <div className="flex justify-center gap-3">
+          <button
+            type="button"
+            onClick={() =>
+              setFormEvento({
+                ...formEvento,
+                esMultiDia: false,
+                fechaFin: "",
+                horaFin: "",
+              })
+            }
+            className={`px-5 py-2 rounded-lg font-bold text-sm transition-all ${!formEvento.esMultiDia ? "bg-sky-600 text-white shadow-md" : "bg-white text-gray-500 border border-gray-200 hover:bg-gray-50"}`}
+          >
+            📅 Único Día
+          </button>
+          <button
+            type="button"
+            onClick={() =>
+              setFormEvento({ ...formEvento, esMultiDia: true })
+            }
+            className={`px-5 py-2 rounded-lg font-bold text-sm transition-all ${formEvento.esMultiDia ? "bg-sky-600 text-white shadow-md" : "bg-white text-gray-500 border border-gray-200 hover:bg-gray-50"}`}
+          >
+            🗓️ Varios Días
+          </button>
+        </div>
+      </div>
+    )}
 
-                    {/* FECHA FIN (SOLO SI ES MULTIDÍA) */}
-                    {formEvento.esMultiDia && (
-                      <div>
-                        <label className="block text-sm font-bold text-gray-700 mb-1">
-                          Fecha Fin <span className="text-red-500">*</span>
-                        </label>
-                        <input
-                          type="date"
-                          value={formEvento.fechaFin}
-                          onChange={(e) =>
-                            setFormEvento({
-                              ...formEvento,
-                              fechaFin: e.target.value,
-                            })
-                          }
-                          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                          required={formEvento.esMultiDia}
-                        />
-                      </div>
-                    )}
+    <div>
+      <label className="block text-sm font-bold text-gray-700 mb-1">
+        Título del Evento <span className="text-red-500">*</span>
+      </label>
+      <input
+        type="text"
+        value={formEvento.titulo}
+        onChange={(e) =>
+          setFormEvento({ ...formEvento, titulo: e.target.value })
+        }
+        placeholder="Ej. Junta de Academia"
+        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+        required
+      />
+    </div>
 
-                    {/* HORA INICIO (SIEMPRE VISIBLE) */}
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1">
-                        Hora de Inicio <span className="text-red-500">*</span>
-                      </label>
-                      <input
-                        type="time"
-                        value={formEvento.hora}
-                        onChange={(e) =>
-                          setFormEvento({ ...formEvento, hora: e.target.value })
-                        }
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                        required
-                      />
-                    </div>
+    <div className={`grid grid-cols-1 md:grid-cols-2 gap-4 p-3 rounded-xl transition-all ${resaltarFechas ? "bg-orange-50 border-2 border-orange-400 ring-4 ring-orange-400 animate-pulse shadow-lg" : ""}`}>
+      {/* FECHA INICIO */}
+      <div>
+        <label className="block text-sm font-bold text-gray-700 mb-1">
+          {formEvento.esMultiDia ? "Fecha Inicio" : "Fecha del Evento"}{" "}
+          <span className="text-red-500">*</span>
+        </label>
+        <input
+          type="date"
+          value={formEvento.fecha}
+          onChange={(e) =>
+            setFormEvento({
+              ...formEvento,
+              fecha: e.target.value,
+            })
+          }
+          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+          required
+        />
+      </div>
 
-                    {/* HORA FIN (SIEMPRE VISIBLE) */}
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-1">
-                        Hora de Fin{" "}
-                        <span className="text-gray-400 font-normal">
-                          (Opcional)
-                        </span>
-                      </label>
-                      <input
-                        type="time"
-                        value={formEvento.horaFin}
-                        onChange={(e) =>
-                          setFormEvento({
-                            ...formEvento,
-                            horaFin: e.target.value,
-                          })
-                        }
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">
-                      Descripción corta <span className="text-red-500">*</span>
-                    </label>
-                    <textarea
-                      rows="3"
-                      value={formEvento.descripcion}
-                      onChange={(e) =>
-                        setFormEvento({
-                          ...formEvento,
-                          descripcion: e.target.value,
-                        })
-                      }
-                      placeholder="Detalles breves del evento..."
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
-                      required
-                    ></textarea>
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-2">
-                      Selecciona una Portada Predefinida
-                    </label>
-                    <div className="grid grid-cols-2 gap-3 mb-3">
-                      {[
-                        {
-                          label: "Académico",
-                          url: "https://images.unsplash.com/photo-1517245386807-bb43f82c33c4?auto=format&fit=crop&w=600&q=80",
-                        },
-                        {
-                          label: "Conferencia",
-                          url: "https://images.unsplash.com/photo-1475721027785-f74eccf877e2?auto=format&fit=crop&w=600&q=80",
-                        },
-                        {
-                          label: "Tecnología",
-                          url: "https://images.unsplash.com/photo-1531482615713-2afd69097998?auto=format&fit=crop&w=600&q=80",
-                        },
-                        {
-                          label: "Reunión",
-                          url: "https://images.unsplash.com/photo-1522071820081-009f0129c71c?auto=format&fit=crop&w=600&q=80",
-                        },
-                      ].map((item, idx) => (
-                        <div
-                          key={idx}
-                          onClick={() =>
-                            setFormEvento({ ...formEvento, portada: item.url })
-                          }
-                          className={`cursor-pointer border-2 rounded-lg p-2 text-center text-xs font-bold transition-all ${formEvento.portada === item.url ? "border-sky-500 bg-sky-50 text-sky-700" : "border-gray-200 text-gray-600"}`}
-                        >
-                          {item.label}
-                        </div>
-                      ))}
-                    </div>
-                    <input
-                      type="text"
-                      value={formEvento.portada}
-                      onChange={(e) =>
-                        setFormEvento({
-                          ...formEvento,
-                          portada: e.target.value,
-                        })
-                      }
-                      placeholder="O pega el link de una imagen..."
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-xs text-gray-500"
-                    />
-                  </div>
-                  <div className="flex gap-3 pt-2">
-                    {editandoEventoId && (
-                      <button
-                        type="button"
-                        onClick={eliminarEvento}
-                        disabled={cargando}
-                        className="bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 py-3 px-4 rounded-lg font-bold transition-all text-sm flex items-center justify-center"
-                      >
-                        🗑️ Eliminar
-                      </button>
-                    )}
-                    <button
-                      type="submit"
-                      disabled={cargando}
-                      className={`flex-1 ${themeBg} text-white py-3 px-4 rounded-lg font-bold hover:opacity-90 transition-all text-sm`}
-                    >
-                      {cargando
-                        ? "Guardando en la nube..."
-                        : editandoEventoId
-                          ? "💾 Actualizar Evento"
-                          : "🚀 Publicar Evento"}
-                    </button>
-                  </div>
-                </form>
-              </div>
+      {/* FECHA FIN */}
+      {formEvento.esMultiDia && (
+        <div>
+          <label className="block text-sm font-bold text-gray-700 mb-1">
+            Fecha Fin <span className="text-red-500">*</span>
+          </label>
+          <input
+            type="date"
+            value={formEvento.fechaFin}
+            onChange={(e) =>
+              setFormEvento({
+                ...formEvento,
+                fechaFin: e.target.value,
+              })
+            }
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+            required={formEvento.esMultiDia}
+          />
+        </div>
+      )}
+
+      {/* HORA INICIO */}
+      <div>
+        <label className="block text-sm font-bold text-gray-700 mb-1">
+          Hora de Inicio <span className="text-red-500">*</span>
+        </label>
+        <input
+          type="time"
+          value={formEvento.hora}
+          onChange={(e) =>
+            setFormEvento({ ...formEvento, hora: e.target.value })
+          }
+          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+          required
+        />
+      </div>
+
+      {/* HORA FIN */}
+      <div>
+        <label className="block text-sm font-bold text-gray-700 mb-1">
+          Hora de Fin{" "}
+          <span className="text-gray-400 font-normal">
+            (Opcional - RECOMENDADO)
+          </span>
+        </label>
+        <input
+          type="time"
+          value={formEvento.horaFin}
+          onChange={(e) =>
+            setFormEvento({
+              ...formEvento,
+              horaFin: e.target.value,
+            })
+          }
+          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+        />
+      </div>
+    </div>
+
+    <div>
+      <label className="block text-sm font-bold text-gray-700 mb-1">
+        Descripción Corta <span className="text-red-500">*</span>
+      </label>
+      <textarea
+        value={formEvento.descripcion}
+        onChange={(e) =>
+          setFormEvento({ ...formEvento, descripcion: e.target.value })
+        }
+        rows="2"
+        placeholder="Breve detalle del evento..."
+        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-sky-400 text-sm"
+        required
+      />
+    </div>
+
+    <div className="flex justify-end gap-3 pt-2">
+      <button
+        type="submit"
+        className="bg-sky-600 hover:bg-sky-700 text-white font-bold px-6 py-2.5 rounded-lg text-sm shadow-sm transition-all"
+      >
+        Guardar Evento
+      </button>
+    </div>
+  </form>
+
+  {/* POPUP ANIMADO DE ERROR DE FECHA */}
+  {mostrarPopupErrorFecha && (
+    <div className="fixed inset-0 bg-gray-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-in fade-in duration-200">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6 text-center border-t-4 border-red-500 transform scale-100 transition-all">
+        <div className="mx-auto flex items-center justify-center h-14 w-14 rounded-full bg-red-100 mb-4 shadow-inner">
+          <span className="text-3xl">⏳</span>
+        </div>
+        <h3 className="text-xl font-black text-gray-900 mb-2">¡Oops! Ese día ya pasó</h3>
+        <p className="text-sm text-gray-600 mb-6 font-medium">
+          No puedes registrar un evento en el pasado. Por favor selecciona una fecha y horario en el futuro para continuar.
+        </p>
+        <button
+          type="button"
+          onClick={() => setMostrarPopupErrorFecha(false)}
+          className="w-full inline-flex justify-center rounded-xl border border-transparent bg-red-600 px-4 py-3 text-sm font-bold text-white hover:bg-red-700 shadow-md transition-colors"
+        >
+          Entendido, cambiaré la fecha
+        </button>
+      </div>
+    </div>
+  )}
+</div>
             </div>
           )}
 
@@ -2463,20 +2776,22 @@ function App() {
 
           {pantallaActual === "eventos_recientes" && (
             <div>
-              <div className="mb-6 bg-red-50 border border-red-200 p-4 rounded-xl shadow-sm">
-                <h2 className="text-red-700 font-bold text-lg mb-1 flex items-center gap-2">
-                  ⚠️ Limpieza Automática
-                </h2>
-                <p className="text-red-600 text-sm font-medium">
-                  Estos eventos han finalizado. Se borrarán de forma permanente
-                  y automática de la base de datos dentro de 15 días a partir de
-                  su cierre.
-                </p>
-              </div>
+              {/* EL MENSAJE ROJO SOLO LO VE EL ADMIN */}
+              {esAdmin && (
+                <div className="mb-6 bg-red-50 border border-red-200 p-4 rounded-xl shadow-sm">
+                  <h2 className="text-red-700 font-bold text-lg mb-1 flex items-center gap-2">
+                    ⚠️ Limpieza Automática
+                  </h2>
+                  <p className="text-red-600 text-sm font-medium">
+                    Estos eventos han finalizado. Se borrarán de forma permanente
+                    y automática de la base de datos dentro de 7 días a partir de
+                    su cierre.
+                  </p>
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {[...listaEventos, ...listaEventosInternos]
                   .filter((ev) => esEventoCaducado(ev))
-                  // Mortales solo ven los públicos caducados o internos a los que sí fueron invitados
                   .filter(
                     (ev) =>
                       esAdmin ||
@@ -2515,21 +2830,46 @@ function App() {
                               {evento.descripcion}
                             </p>
                           </div>
+                          
                           <div className="mt-4 pt-3 border-t border-gray-100">
-                            <p className="text-center text-red-500 text-xs font-bold mb-3 animate-pulse">
-                              ⏳ Se elimina en {diasRestantes} día
-                              {diasRestantes !== 1 ? "s" : ""}
-                            </p>
-                            <button
-                              onClick={() => {
-                                setEventoSeleccionado(evento);
-                                navegarA("detalle_evento");
-                              }}
-                              className="w-full bg-gray-800 text-white py-2.5 rounded-lg font-bold hover:bg-black transition-all text-sm flex justify-center items-center gap-2"
-                            >
-                              👁️ Ver Archivo Histórico
-                            </button>
+                            {/* AQUÍ SEPARRAMOS QUÉ VE EL ADMIN Y QUÉ VE EL MAESTRO */}
+                            {esAdmin ? (
+                              <>
+                                <p className="text-center text-red-500 text-xs font-bold mb-3 animate-pulse">
+                                  ⏳ Se elimina en {diasRestantes} día
+                                  {diasRestantes !== 1 ? "s" : ""}
+                                </p>
+                                <div className="flex flex-col gap-2">
+                                  <button
+                                    onClick={() => {
+                                      setEventoSeleccionado(evento);
+                                      navegarA("detalle_evento");
+                                    }}
+                                    className="w-full bg-gray-800 text-white py-2.5 rounded-lg font-bold hover:bg-black transition-all text-sm flex justify-center items-center gap-2"
+                                  >
+                                    👁️ Ver Archivo Histórico
+                                  </button>
+                                  <button
+                                    onClick={() => prepararReutilizacionEvento(evento)}
+                                    className="w-full bg-emerald-600 text-white py-2.5 rounded-lg font-bold hover:bg-emerald-700 transition-all text-sm flex justify-center items-center gap-2 shadow-sm"
+                                  >
+                                    🔄 Volver a cargar evento
+                                  </button>
+                                </div>
+                              </>
+                            ) : (
+                              <button
+                                onClick={() => {
+                                  setEventoSeleccionado(evento);
+                                  navegarA("detalle_evento");
+                                }}
+                                className="w-full bg-fime-main text-white py-2.5 rounded-lg font-bold hover:bg-fime-dark transition-all text-sm flex justify-center items-center gap-2"
+                              >
+                                👁️ Ver Detalles
+                              </button>
+                            )}
                           </div>
+
                         </div>
                       </div>
                     );
@@ -2612,14 +2952,7 @@ function App() {
                       // MODO ACTIVO (SOLO MORTALES LLEGAN AQUÍ)
                       !esAdmin &&
                       (eventoSeleccionado.tipo === "interno" ? (
-                        <div className="w-full bg-gradient-to-r from-amber-50 to-orange-50 p-4 rounded-xl border border-amber-200 text-center flex flex-col justify-center shadow-inner">
-                          <span className="font-semibold text-gray-700 text-sm mb-1">
-                            Ya estás invitado al evento.
-                          </span>
-                          <span className="font-black tracking-wide text-orange-600 drop-shadow-sm text-[0.90rem] sm:text-base">
-                            FAVOR DE CONFIRMAR ASISTENCIA MEDIANTE EL QR ENVIADO
-                          </span>
-                        </div>
+                        <BannerAsistenciaDinamico evento={eventoSeleccionado} numEmpleado={numEmpleado} />
                       ) : (
                         <button
                           onClick={registrarPreAsistencia}
@@ -2675,5 +3008,21 @@ function App() {
   );
 }
 
+// ==============================================================
+// EL VERDADERO CANDADO ANTI-CLONES (NIVEL DIOS)
+// Se ejecuta ANTES de que React despierte. Si es clon, lo mata aquí mismo.
+// ==============================================================
+if (!window.name) {
+  // Le ponemos una placa de identidad a la pestaña original
+  window.name = "FimeTab_" + Date.now();
+  
+  // Si la pestaña NO tenía placa, pero SÍ tiene memoria guardada, es un clon (Chrome copió la memoria).
+  if (sessionStorage.getItem("pantallaFime")) {
+    sessionStorage.clear(); // Le borramos la memoria robada
+    window.location.replace(window.location.pathname); // Lo regresamos al login sin dejar historial
+  }
+}
+
+// Ya que pasamos la seguridad, encendemos React
 const root = ReactDOM.createRoot(document.getElementById("root"));
 root.render(<App />);
