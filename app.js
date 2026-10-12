@@ -11,13 +11,15 @@ const BannerAsistenciaDinamico = ({ evento, numEmpleado }) => {
     if (!evento || !numEmpleado) return;
 
     const calcularDiasEvento = (fechaInicio, fechaFin, esMultiDia) => {
-      if (!esMultiDia || !fechaFin || !fechaInicio) return 1;
-      const inicio = new Date(`${fechaInicio}T00:00:00`);
-      const fin = new Date(`${fechaFin}T00:00:00`);
-      const diferenciaMs = fin - inicio;
-      const dias = Math.ceil(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
-      return dias > 0 ? dias : 1;
-    };
+    if (!esMultiDia || !fechaFin || !fechaInicio) return 1;
+    const inicio = new Date(`${fechaInicio}T00:00:00`);
+    const fin = new Date(`${fechaFin}T00:00:00`);
+    const diferenciaMs = fin - inicio;
+    const dias = Math.ceil(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
+    
+    // BLINDAJE ANTI-NaN: Si el cálculo da error, devolvemos 1 día por defecto
+    return (dias > 0 && !isNaN(dias)) ? dias : 1; 
+  };
 
     const docIdUnico = `${evento.id}_${String(numEmpleado).trim()}`;
     
@@ -179,12 +181,13 @@ function App() {
   // === CÁLCULO DE DÍAS PARA EVENTOS MULTI-DÍA ===
   const calcularDiasEvento = (fechaInicio, fechaFin, esMultiDia) => {
     if (!esMultiDia || !fechaFin || !fechaInicio) return 1;
-    // Convertimos a fechas forzando la zona horaria local para evitar brincos de día
     const inicio = new Date(`${fechaInicio}T00:00:00`);
     const fin = new Date(`${fechaFin}T00:00:00`);
     const diferenciaMs = fin - inicio;
     const dias = Math.ceil(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
-    return dias > 0 ? dias : 1; // Si por error ponen fecha fin anterior a la de inicio, regresa 1
+    
+    // BLINDAJE ANTI-NaN: Si el cálculo da error, devolvemos 1 día por defecto
+    return (dias > 0 && !isNaN(dias)) ? dias : 1; 
   };
 
   // === NUEVO: CEREBRO DEL TIEMPO (CADUCIDAD Y AUTODESTRUCCIÓN) ===
@@ -278,7 +281,11 @@ function App() {
   // 1. FUNCIÓN PARA AGREGAR MAESTRO MANUAL (Reemplazo del botón morado)
   const agregarMaestroManualEvento = async (e) => {
     e.preventDefault();
-    if (!formNuevoMaestro.id || !formNuevoMaestro.nombreCompleto) return;
+    // AÑADIDO: Blindaje extra para asegurar que todo exista
+    if (!eventoSeleccionado || !eventoSeleccionado.id || !formNuevoMaestro.id || !formNuevoMaestro.nombreCompleto) {
+        alert("Error: Faltan datos o el evento no está seleccionado.");
+        return;
+    }
     setCargando(true);
 
     try {
@@ -347,22 +354,16 @@ function App() {
     sessionStorage.setItem("nombreMaestroFime", nombreMaestro);
   }, [pantallaActual, esAdmin, numEmpleado, nombreMaestro]);
 
+  // === CORRECCIÓN VITAL: CACHÉ DE SESIÓN PARA AHORRAR LECTURAS ===
   useEffect(() => {
-    // CARGA INMEDIATA: Sin importar si recargas en eventos, historial o admin, descargamos ambas bases de datos al instante
-    obtenerEventos("publico");
-    obtenerEventos("interno");
+    // Solo vamos a Firebase si no tenemos los datos en la memoria RAM (estado)
+    if (listaEventos.length === 0) obtenerEventos("publico");
+    if (listaEventosInternos.length === 0) obtenerEventos("interno");
 
-    // BLINDAJE: Cargamos a los maestros cuando se necesite
-    if (
-      esAdmin &&
-      (pantallaActual === "admin_maestros" ||
-        pantallaActual === "admin_asistencia_evento" ||
-        pantallaActual === "eventos_recientes" ||
-        pantallaActual === "detalle_evento")
-    ) {
+    if (esAdmin && listaDirectorio.length === 0) {
       obtenerMaestros();
     }
-  }, [pantallaActual, esAdmin]);
+  }, [esAdmin]); // ELIMINAMOS 'pantallaActual'. Ya no se descargan 300 maestros por cada clic en el menú.
 
   // === EFECTOS EN TIEMPO REAL (ADIÓS AL F5 Y RETRASOS) ===
   useEffect(() => {
@@ -447,99 +448,98 @@ function App() {
       if (unsubscribeAsis) unsubscribeAsis();
       if (unsubscribeUsuario) unsubscribeUsuario();
     };
-  }, [pantallaActual, eventoSeleccionado, esAdmin, numEmpleado]);
+  // ELIMINADO 'pantallaActual'. Solo recargamos Firebase si cambia el evento o el usuario.
+  }, [eventoSeleccionado, esAdmin, numEmpleado]);
 
   // === NUEVO: EFECTO DE INACTIVIDAD (3 MINUTOS) ===
   useEffect(() => {
-    // Si no ha iniciado sesión o está firmando por QR, no activamos el contador
-    if (
-      pantallaActual === "validacion" ||
-      pantallaActual === "confirmar_asistencia"
-    )
-      return;
-
-    const TIEMPO_LIMITE = 3 * 60 * 1000; // 3 minutos en milisegundos
     let timeoutId;
-    let ultimoActivo = Date.now();
 
-    const verificarYcerrar = () => {
-      if (Date.now() - ultimoActivo >= TIEMPO_LIMITE) {
-        cerrarSesion();
-        alert("⚠️ Tu sesión ha sido cerrada automáticamente por inactividad.");
-      }
-    };
-
-    const reiniciarTimer = () => {
-      ultimoActivo = Date.now();
+    const resetTimer = () => {
       clearTimeout(timeoutId);
-      timeoutId = setTimeout(verificarYcerrar, TIEMPO_LIMITE);
-    };
-
-    const checarAlVolver = () => {
-      // Si regresa a la pestaña y ya pasaron 3 minutos, se cierra.
-      if (!document.hidden) {
-        verificarYcerrar();
+      timeoutId = setTimeout(() => {
+        // En lugar de leer el estado, leemos directamente si la sesión sigue viva en memoria
+        const adminToken = sessionStorage.getItem("esAdminFime");
+        const userToken = sessionStorage.getItem("numEmpleadoFime");
+        
+        if (adminToken || userToken) {
+        sessionStorage.clear();
+        window.location.reload(); 
       }
+    // CORRECCIÓN VITAL: 60 minutos si eres admin (para no interrumpir eventos), 3 minutos si eres usuario normal
+    }, (sessionStorage.getItem("esAdminFime") === "true" ? 60 : 3) * 60 * 1000);
     };
 
-    const eventosUsuario = [
-      "mousemove",
-      "keydown",
-      "scroll",
-      "touchstart",
-      "click",
-    ];
+    const eventosUsuario = ["mousemove", "keydown", "click", "scroll", "touchstart"];
+    eventosUsuario.forEach((evt) => window.addEventListener(evt, resetTimer));
 
-    eventosUsuario.forEach((evt) =>
-      window.addEventListener(evt, reiniciarTimer),
-    );
-    document.addEventListener("visibilitychange", checarAlVolver);
-
-    reiniciarTimer();
+    resetTimer(); // Iniciar primer conteo
 
     return () => {
       clearTimeout(timeoutId);
-      eventosUsuario.forEach((evt) =>
-        window.removeEventListener(evt, reiniciarTimer),
-      );
-      document.removeEventListener("visibilitychange", checarAlVolver);
+      eventosUsuario.forEach((evt) => window.removeEventListener(evt, resetTimer));
     };
-  }, [pantallaActual]);
+  }, []); // <-- ARRAY VACÍO: Adiós fugas de memoria. Solo se ejecuta una vez.
 
   // === NUEVO: EFECTO DE AUTODESTRUCCIÓN DE EVENTOS (+15 DÍAS) ===
   useEffect(() => {
     const limpiarEventosCaducados = async () => {
-      // Juntamos todos los eventos que existen
       const todosLosEventos = [...listaEventos, ...listaEventosInternos];
-
-      // Filtramos los que ya caducaron y su contador llegó a 0
       const eventosParaBorrar = todosLosEventos.filter(
         (ev) => esEventoCaducado(ev) && diasParaEliminacion(ev) === 0,
       );
 
       if (eventosParaBorrar.length > 0) {
         try {
-          const batch = db.batch();
-          eventosParaBorrar.forEach((ev) => {
-            const coleccion =
-              ev.tipo === "interno" ? "eventos_internos_fime" : "eventos_fime";
-            batch.delete(db.collection(coleccion).doc(ev.id));
-          });
-          await batch.commit();
+          // 1. Recolectar TODA la basura asociada al evento antes de borrarlo
+          const refsABorrar = [];
+          
+          for (const ev of eventosParaBorrar) {
+            // Rastrear pre-asistencias huérfanas
+            const preSnap = await db.collection("pre_asistencias").where("eventoId", "==", ev.id).get();
+            preSnap.docs.forEach(doc => refsABorrar.push(doc.ref));
 
-          // Refrescamos las listas silenciosamente
-          obtenerEventos("publico");
-          obtenerEventos("interno");
+            // Rastrear firmas huérfanas
+            const asisSnap = await db.collection("asistencias").where("eventoId", "==", ev.id).get();
+            asisSnap.docs.forEach(doc => refsABorrar.push(doc.ref));
+
+            // Añadir el propio evento a la lista de ejecución
+            const coleccion = ev.tipo === "interno" ? "eventos_internos_fime" : "eventos_fime";
+            refsABorrar.push(db.collection(coleccion).doc(ev.id));
+          }
+
+          // 2. Destrucción segura en lotes de 490 para evitar colapso de Firebase
+          const CHUNK_SIZE = 490;
+          for (let i = 0; i < refsABorrar.length; i += CHUNK_SIZE) {
+            const chunk = refsABorrar.slice(i, i + CHUNK_SIZE);
+            const batch = db.batch();
+            chunk.forEach((ref) => batch.delete(ref));
+            await batch.commit();
+          }
+
+          // CORRECCIÓN VITAL: Refrescamos la memoria localmente SIN reactivar el bucle hacia Firebase
+          setListaEventos(prev => prev.filter(ev => !eventosParaBorrar.some(b => b.id === ev.id)));
+          setListaEventosInternos(prev => prev.filter(ev => !eventosParaBorrar.some(b => b.id === ev.id)));
         } catch (error) {
           console.error("Error en autodestrucción:", error);
         }
       }
     };
 
-    if (listaEventos.length > 0 || listaEventosInternos.length > 0) {
-      limpiarEventosCaducados();
-    }
-  }, [listaEventos, listaEventosInternos]);
+    // SOLO EL ADMIN TIENE PERMISO DE EJECUTAR LA LIMPIEZA AUTOMÁTICA
+  if (esAdmin && (listaEventos.length > 0 || listaEventosInternos.length > 0)) {
+    limpiarEventosCaducados();
+  }
+  }, [listaEventos, listaEventosInternos,esAdmin]);
+
+  // Agrega este useEffect justo después de tus otros useEffects globales
+useEffect(() => {
+  if (qrEventoId && numEmpleado && pantallaActual !== "confirmar_asistencia") {
+    // Si escaneó un QR y ya estaba logueado, forzar la validación para ir a la firma
+    const e = { preventDefault: () => {} };
+    manejarValidacion(e); 
+  }
+}, [qrEventoId]);
 
   // ==========================================
   // FUNCIONES DE CARGA Y VALIDACIÓN
@@ -632,6 +632,14 @@ function App() {
             return;
           }
 
+          // BLINDAJE ANTI-TRAMPAS: Bloquear si el evento ya caducó
+          const eventoData = { id: eventoDoc.id, ...eventoDoc.data() };
+          if (esEventoCaducado(eventoData)) {
+            setError("⏳ Este evento ya ha finalizado. No se aceptan más registros de asistencia.");
+            setCargando(false);
+            return;
+          }
+
           // Si el evento es interno, exige que el usuario esté específicamente en el Excel de invitados
           if (esInterno) {
             const docIdUnico = `${qrEventoId}_${inputLimpio}`;
@@ -678,6 +686,9 @@ function App() {
     setModoEdicion(false);
     setMostrarPopup(false);
     setConfirmacionExitosa(false);
+    // Vaciamos arreglos de Firebase para no contaminar al siguiente usuario
+    setMisInvitaciones([]); 
+    setEventoSeleccionado(null);
   };
 
   const navegarA = (pantalla) => {
@@ -881,10 +892,10 @@ function App() {
       ...cambiosDirectorio, // Y después todo lo que ya existía
     ]);
   };
+
   const eliminarFila = async (index) => {
     const maestroAEliminar = cambiosDirectorio[index];
 
-    // Si es una fila nueva vacía que aún no se guarda en BD, solo la quitamos de la pantalla
     if (!maestroAEliminar.id || maestroAEliminar.id.trim() === "") {
       const nuevaLista = [...cambiosDirectorio];
       nuevaLista.splice(index, 1);
@@ -900,28 +911,28 @@ function App() {
     setCargando(true);
     try {
       const idLimpio = String(maestroAEliminar.id).trim();
+      const refsABorrar = [];
 
-      // 1. Borrar del directorio general
-      await db.collection("directorio_fime").doc(idLimpio).delete();
+      refsABorrar.push(db.collection("directorio_fime").doc(idLimpio));
 
-      // 2. Borrar pre-asistencias (búsqueda y destrucción)
       const preSnap = await db.collection("pre_asistencias").where("numEmpleado", "==", idLimpio).get();
-      const batchPre = db.batch();
-      preSnap.docs.forEach(doc => batchPre.delete(doc.ref));
-      await batchPre.commit();
+      preSnap.docs.forEach(doc => refsABorrar.push(doc.ref));
 
-      // 3. Borrar firmas de asistencias finales
       const asisSnap = await db.collection("asistencias").where("numEmpleado", "==", idLimpio).get();
-      const batchAsis = db.batch();
-      asisSnap.docs.forEach(doc => batchAsis.delete(doc.ref));
-      await batchAsis.commit();
+      asisSnap.docs.forEach(doc => refsABorrar.push(doc.ref));
 
-      // 4. Actualizar las tablas visuales
+      // BORRADO SEGURO CON CHUNK DE 490
+      const CHUNK_SIZE = 490;
+      for (let i = 0; i < refsABorrar.length; i += CHUNK_SIZE) {
+        const chunk = refsABorrar.slice(i, i + CHUNK_SIZE);
+        const batch = db.batch();
+        chunk.forEach((ref) => batch.delete(ref));
+        await batch.commit();
+      }
+
       const nuevaLista = [...cambiosDirectorio];
       nuevaLista.splice(index, 1);
       setCambiosDirectorio(nuevaLista);
-      
-      // También quitamos al maestro de la lista oficial para que no reviva si le dan a cancelar
       setListaDirectorio((prev) => prev.filter(m => String(m.id).trim() !== idLimpio));
 
       alert("🗑️ Maestro y todos sus registros han sido eliminados permanentemente.");
@@ -932,7 +943,6 @@ function App() {
     setCargando(false);
   };
       
-  // === NUEVO: LIMPIADOR PROFUNDO DE BASE DE DATOS ===
   const sanitizarBaseDeDatos = async () => {
     const confirmacion = window.confirm(
       "⚠️ ¿Estás seguro de sanitizar la base de datos?\n\nEsto buscará y eliminará permanentemente de TODOS los eventos a cualquier maestro que ya no exista en tu Lista de Registro.\n\nEsta acción no se puede deshacer.",
@@ -945,31 +955,32 @@ function App() {
       const dirSnap = await db.collection("directorio_fime").get();
       const idsValidos = dirSnap.docs.map((doc) => String(doc.id).trim());
 
-      let eliminadosCount = 0;
-      const promesasBorrado = [];
+      const refsABorrar = [];
 
       // 2. Rastrear en pre-asistencias
       const preSnap = await db.collection("pre_asistencias").get();
       preSnap.docs.forEach((doc) => {
         const numEmp = String(doc.data().numEmpleado).trim();
-        if (!idsValidos.includes(numEmp)) {
-          promesasBorrado.push(doc.ref.delete());
-          eliminadosCount++;
-        }
+        if (!idsValidos.includes(numEmp)) refsABorrar.push(doc.ref);
       });
 
       // 3. Rastrear en asistencias (firmas finales)
       const asisSnap = await db.collection("asistencias").get();
       asisSnap.docs.forEach((doc) => {
         const numEmp = String(doc.data().numEmpleado).trim();
-        if (!idsValidos.includes(numEmp)) {
-          promesasBorrado.push(doc.ref.delete());
-          eliminadosCount++;
-        }
+        if (!idsValidos.includes(numEmp)) refsABorrar.push(doc.ref);
       });
 
-      // Ejecutar la destrucción masiva
-      await Promise.all(promesasBorrado);
+      // 4. DESTRUCCIÓN SEGURA EN LOTES DE 490
+      let eliminadosCount = 0;
+      const CHUNK_SIZE = 490;
+      for (let i = 0; i < refsABorrar.length; i += CHUNK_SIZE) {
+        const chunk = refsABorrar.slice(i, i + CHUNK_SIZE);
+        const batch = db.batch();
+        chunk.forEach((ref) => batch.delete(ref));
+        await batch.commit();
+        eliminadosCount += chunk.length;
+      }
 
       alert(`✅ Sanitización completa. Se eliminaron ${eliminadosCount} registros fantasma de maestros que ya no están en el directorio.`);
     } catch (error) {
@@ -994,29 +1005,45 @@ function App() {
         const idLimpio = String(emp.id).trim();
         promesasLimpieza.push(db.collection("directorio_fime").doc(idLimpio).delete());
 
-        // Buscar y destruir en pre_asistencias
-        const p1 = db.collection("pre_asistencias").where("numEmpleado", "==", idLimpio).get().then(snap => {
-          const batchBorrado = db.batch();
-          snap.docs.forEach(d => batchBorrado.delete(d.ref));
-          return batchBorrado.commit();
+        // Buscar y destruir en pre_asistencias con Chunks
+        const p1 = db.collection("pre_asistencias").where("numEmpleado", "==", idLimpio).get().then(async (snap) => {
+          const CHUNK_SIZE = 490;
+          for (let i = 0; i < snap.docs.length; i += CHUNK_SIZE) {
+            const chunk = snap.docs.slice(i, i + CHUNK_SIZE);
+            const batchBorrado = db.batch();
+            chunk.forEach(d => batchBorrado.delete(d.ref));
+            await batchBorrado.commit();
+          }
         });
 
-        // Buscar y destruir en asistencias
-        const p2 = db.collection("asistencias").where("numEmpleado", "==", idLimpio).get().then(snap => {
-          const batchBorrado = db.batch();
-          snap.docs.forEach(d => batchBorrado.delete(d.ref));
-          return batchBorrado.commit();
+        // Buscar y destruir en asistencias con Chunks
+        const p2 = db.collection("asistencias").where("numEmpleado", "==", idLimpio).get().then(async (snap) => {
+          const CHUNK_SIZE = 490;
+          for (let i = 0; i < snap.docs.length; i += CHUNK_SIZE) {
+            const chunk = snap.docs.slice(i, i + CHUNK_SIZE);
+            const batchBorrado = db.batch();
+            chunk.forEach(d => batchBorrado.delete(d.ref));
+            await batchBorrado.commit();
+          }
         });
 
         promesasLimpieza.push(p1, p2);
       });
 
-      // CORRECCIÓN VITAL: Dividimos el guardado en lotes (Chunks) de 490 para evitar el colapso de Firebase
-      const CHUNK_SIZE = 490;
+      // CORRECCIÓN VITAL: Ahorro extremo de recursos en Firebase (Solo actualiza lo que cambió)
       const maestrosValidos = cambiosDirectorio.filter(emp => emp.id && emp.id.trim() !== "");
+      
+      const maestrosAActualizar = maestrosValidos.filter(empMod => {
+        const original = listaDirectorio.find(orig => orig.id === empMod.id);
+        if (!original) return true; // Es un maestro nuevo
+        // Retorna true solo si realmente le modificaste el nombre o la trayectoria
+        return original.nombreCompleto !== empMod.nombreCompleto || original.trayectoria !== empMod.trayectoria;
+      });
 
-      for (let i = 0; i < maestrosValidos.length; i += CHUNK_SIZE) {
-        const chunk = maestrosValidos.slice(i, i + CHUNK_SIZE);
+      const CHUNK_SIZE = 490;
+      // Ahora solo recorre e impacta a los maestros que sufrieron un cambio
+      for (let i = 0; i < maestrosAActualizar.length; i += CHUNK_SIZE) {
+        const chunk = maestrosAActualizar.slice(i, i + CHUNK_SIZE);
         const batchGuardado = db.batch();
 
         chunk.forEach((emp) => {
@@ -1039,6 +1066,7 @@ function App() {
       setListaDirectorio(cambiosDirectorio);
       setModoEdicion(false);
       alert("✅ Cambios guardados y base de datos limpia con éxito.");
+      obtenerMaestros();
     } catch (err) {
       alert("❌ Error al guardar: " + err.message);
     }
@@ -1108,11 +1136,13 @@ function App() {
           .where("eventoId", "==", editandoEventoId)
           .get();
         if (!snapshotPre.empty) {
-          const batch = db.batch();
-          snapshotPre.docs.forEach((doc) => {
-            batch.delete(doc.ref);
-          });
-          await batch.commit();
+          const CHUNK_SIZE = 490;
+          for (let i = 0; i < snapshotPre.docs.length; i += CHUNK_SIZE) {
+            const chunk = snapshotPre.docs.slice(i, i + CHUNK_SIZE);
+            const batch = db.batch();
+            chunk.forEach((doc) => batch.delete(doc.ref));
+            await batch.commit();
+          }
         }
         alert(
           "✅ ¡Evento actualizado y pre-asistencias reiniciadas con éxito!",
@@ -1132,6 +1162,8 @@ function App() {
         });
       }
 
+      obtenerEventos("publico");
+      obtenerEventos("interno");
       setFormEvento({
         titulo: "",
         descripcion: "",
@@ -1169,9 +1201,28 @@ function App() {
 
         await db.collection(coleccionDestino).doc(editandoEventoId).delete();
 
+        // LIMPIEZA PROFUNDA: Borrar todo rastro de pre-asistencias y firmas de este evento
+        const refsABorrar = [];
+        
+        const preSnap = await db.collection("pre_asistencias").where("eventoId", "==", editandoEventoId).get();
+        preSnap.docs.forEach(doc => refsABorrar.push(doc.ref));
+
+        const asisSnap = await db.collection("asistencias").where("eventoId", "==", editandoEventoId).get();
+        asisSnap.docs.forEach(doc => refsABorrar.push(doc.ref));
+
+        const CHUNK_SIZE = 490;
+        for (let i = 0; i < refsABorrar.length; i += CHUNK_SIZE) {
+          const chunk = refsABorrar.slice(i, i + CHUNK_SIZE);
+          const batch = db.batch();
+          chunk.forEach((ref) => batch.delete(ref));
+          await batch.commit();
+        }
+
         alert(
-          "🗑️ El evento ha sido eliminado permanentemente de la base de datos.",
+          "🗑️ El evento y todas sus firmas han sido eliminados permanentemente de la base de datos.",
         );
+        obtenerEventos("publico");
+        obtenerEventos("interno");
         setEditandoEventoId(null);
 
         // Redirigimos a su pantalla correspondiente
@@ -1502,8 +1553,8 @@ function App() {
           }
         }
 
-        // CORRECCIÓN: Procesamos en Lotes (Batches) de 490 para no romper el límite de Firebase
-        const CHUNK_SIZE = 490;
+        // CORRECCIÓN: Procesamos en Lotes (Batches) de 240 para no romper el límite de Firebase
+        const CHUNK_SIZE = 240;
         for (let i = 0; i < datosExtraidos.length; i += CHUNK_SIZE) {
           const chunk = datosExtraidos.slice(i, i + CHUNK_SIZE);
           const batch = db.batch();
@@ -2169,7 +2220,7 @@ function App() {
               <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex-1 overflow-hidden flex flex-col">
                 {/* VARIABLE QUE CALCULA LOS DÍAS EN VIVO */}
                 {(() => {
-                  const numDias = eventoSeleccionado
+                  const numDias = eventoSeleccionado?.fecha
                     ? calcularDiasEvento(
                         eventoSeleccionado.fecha,
                         eventoSeleccionado.fechaFin,
