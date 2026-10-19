@@ -1,5 +1,8 @@
 const { useState, useEffect } = React;
 
+// Cuenta del administrador en Firebase Authentication
+const CORREO_ADMIN = "coordinacion.fimeed05@gmail.com";
+
 // === COMPONENTE DINÁMICO DE ASISTENCIA PARA DOCENTES ===
 const BannerAsistenciaDinamico = ({ evento, numEmpleado }) => {
   const [asistioHoy, setAsistioHoy] = useState(false);
@@ -539,6 +542,18 @@ function App() {
     return () => unsub();
   }, [esAdmin, numEmpleado, pantallaActual === "validacion"]);
 
+
+    // === SEGURIDAD: el modo admin solo existe con sesión real de Firebase ===
+  useEffect(() => {
+    const unsub = auth.onAuthStateChanged((user) => {
+      if (!user && sessionStorage.getItem("esAdminFime") === "true") {
+        cerrarSesion();
+      }
+    });
+    return () => unsub();
+  }, []);
+
+
   // === NUEVO: EFECTO DE INACTIVIDAD (3 MINUTOS) ===
   useEffect(() => {
     let timeoutId;
@@ -703,19 +718,7 @@ function App() {
     const inputLimpio = numEmpleado.trim();
 
     try {
-      const configRef = db.collection("config").doc("admin_auth");
-      const configSnap = await configRef.get();
-
-      if (configSnap.exists) {
-        const adminData = configSnap.data();
-        if (inputLimpio === adminData.claveAdmin) {
-          setNombreMaestro(adminData.nombreAdmin || "Administrador");
-          setEsAdmin(true);
-          setPantallaActual("registro");
-          setCargando(false);
-          return;
-        }
-      }
+      
 
       // REGLA MÁXIMA: Si no existe en la Lista de Maestros General, aquí mismo rebota (Público o Interno).
       const docRef = db.collection("directorio_fime").doc(inputLimpio);
@@ -787,10 +790,24 @@ function App() {
         } else {
           setPantallaActual("registro");
         }
-      } else {
-        setError(
-          "Acceso denegado. Número de empleado no registrado en la Base de Datos de FIME.",
-        );
+            } else {
+        // No es maestro: se intenta como administrador con Firebase Auth
+        try {
+          await auth.signInWithEmailAndPassword(CORREO_ADMIN, inputLimpio);
+          setNombreMaestro("Administrador"); // cámbialo por el nombre que quieras mostrar
+          setEsAdmin(true);
+          setPantallaActual("registro");
+                } catch (errAuth) {
+          //console.error("Error de Auth:", errAuth.code, errAuth.message);
+          console.error("Error real de Firebase Auth:", errAuth); // <-- 💡 AGREGA ESTA LÍNEA AQUÍ
+          if (errAuth.code === "auth/too-many-requests") {
+            setError("Demasiados intentos. Espera unos minutos e inténtalo de nuevo.");
+          } else {
+            setError(
+              "Acceso denegado. Número de empleado no registrado en la Base de Datos de FIME.",
+            );
+          }
+        }
       }
     } catch (err) {
       console.error("Error al consultar:", err);
@@ -802,6 +819,7 @@ function App() {
 
   const cerrarSesion = () => {
     sessionStorage.clear();
+    auth.signOut();
     setPantallaActual("validacion");
     setNumEmpleado("");
     setNombreMaestro("");
