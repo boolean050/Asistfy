@@ -662,9 +662,10 @@ function App() {
 
   // Agrega este useEffect justo después de tus otros useEffects globales
   useEffect(() => {
-    if (
+       if (
       qrEventoId &&
       numEmpleado &&
+      !esAdmin &&
       pantallaActual !== "confirmar_asistencia"
     ) {
       // Si escaneó un QR y ya estaba logueado, forzar la validación para ir a la firma
@@ -793,7 +794,8 @@ function App() {
             } else {
         // No es maestro: se intenta como administrador con Firebase Auth
         try {
-          await auth.signInWithEmailAndPassword(CORREO_ADMIN, inputLimpio);
+                    await auth.signInWithEmailAndPassword(CORREO_ADMIN, inputLimpio);
+          setNumEmpleado("ADMIN"); // no dejar la contraseña en memoria ni en sessionStorage
           setNombreMaestro("Administrador"); // cámbialo por el nombre que quieras mostrar
           setEsAdmin(true);
           setPantallaActual("registro");
