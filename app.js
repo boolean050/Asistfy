@@ -101,6 +101,22 @@ const BannerAsistenciaDinamico = ({ evento, numEmpleado }) => {
     );
   }
 
+    // 2b. ESTADO AZUL (El evento aún no inicia)
+  const hoyISO = new Date().toLocaleDateString("en-CA");
+  if (evento.fecha && hoyISO < evento.fecha) {
+    const [anio, mes, dia] = evento.fecha.split("-");
+    return (
+      <div className="w-full bg-sky-50 p-4 rounded-xl border border-sky-200 text-center flex flex-col justify-center shadow-inner transition-all duration-300">
+        <span className="font-semibold text-sky-800 text-sm mb-1">
+          Este evento aún no inicia.
+        </span>
+        <span className="font-black tracking-wide text-sky-700 drop-shadow-sm text-[0.90rem] sm:text-base">
+          INICIA EL {dia}/{mes}/{anio}
+        </span>
+      </div>
+    );
+  }
+
   // 3. ESTADO NARANJA (Falta asistir)
   return (
     <div className="w-full bg-gradient-to-r from-amber-50 to-orange-50 p-4 rounded-xl border border-amber-200 text-center flex flex-col justify-center shadow-inner transition-all duration-300">
@@ -217,6 +233,7 @@ function App() {
     id: "",
     nombreCompleto: "",
   });
+  const [errorModalMaestro, setErrorModalMaestro] = useState("");
   const [resaltarFechas, setResaltarFechas] = useState(false); // Para el efecto visual al clonar
 
   // === CÁLCULO DE DÍAS PARA EVENTOS MULTI-DÍA ===
@@ -332,49 +349,64 @@ function App() {
     }
   };
 
-  // 1. FUNCIÓN PARA AGREGAR MAESTRO MANUAL (Reemplazo del botón morado)
+  // 1. FUNCIÓN PARA AGREGAR MAESTRO MANUAL BLINDADA
   const agregarMaestroManualEvento = async (e) => {
     e.preventDefault();
-    // AÑADIDO: Blindaje extra para asegurar que todo exista
-    if (
-      !eventoSeleccionado ||
-      !eventoSeleccionado.id ||
-      !formNuevoMaestro.id ||
-      !formNuevoMaestro.nombreCompleto
-    ) {
-      alert("Error: Faltan datos o el evento no está seleccionado.");
-      return;
-    }
+    if (!eventoSeleccionado || !formNuevoMaestro.id) return;
+    
     setCargando(true);
+    setErrorModalMaestro(""); // Limpiamos errores previos
 
     try {
       const idLimpio = String(formNuevoMaestro.id).trim();
-      const nombreLimpio = formNuevoMaestro.nombreCompleto.trim();
+      
+      // NUEVA VALIDACIÓN: Revisar si ya está registrado en este evento
+      if (preRegistradosEvento && preRegistradosEvento.includes(idLimpio)) {
+        setErrorModalMaestro("⚠️ Este maestro ya se encuentra en la tabla de este evento.");
+        setCargando(false);
+        return;
+      }
 
-      const dirRef = db.collection("directorio_fime").doc(idLimpio);
-      await dirRef.set(
-        { nombreCompleto: nombreLimpio, registrado: true },
-        { merge: true },
+      // VALIDACIÓN ESTRICTA: Buscamos en el directorio en memoria
+      const maestroEnDirectorio = listaDirectorio.find(
+        (m) => String(m.id).trim() === idLimpio
       );
 
+      if (!maestroEnDirectorio) {
+        setErrorModalMaestro("Este número de empleado no existe en la Base de Datos General. Regístralo en 'Lista Maestros Registro' primero.");
+        setCargando(false);
+        return; // Detenemos la función aquí mismo
+      }
+
+      // Si sí existe, usamos su nombre oficial del directorio
+      const nombreOficial = maestroEnDirectorio.nombreCompleto;
       const docIdUnico = `${eventoSeleccionado.id}_${idLimpio}`;
       const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
+      
       await preAsisRef.set({
         eventoId: eventoSeleccionado.id,
         numEmpleado: idLimpio,
-        nombreMaestro: nombreLimpio,
+        nombreMaestro: nombreOficial,
         fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
       });
 
       setPreRegistradosEvento((prev) => [
         ...new Set([...(prev || []), idLimpio]),
       ]);
+
+      // SOLUCIÓN AL FANTASMA: Si por alguna razón no estaba visualmente en la tabla del evento, lo inyectamos
+      setListaDirectorio((prev) => {
+        const yaExiste = prev.find(m => String(m.id).trim() === idLimpio);
+        if (yaExiste) return prev;
+        return [...prev, { id: idLimpio, nombreCompleto: nombreOficial, trayectoria: "", registrado: true }];
+      });
+
       setMostrarModalAgregarMaestro(false);
       setFormNuevoMaestro({ id: "", nombreCompleto: "" });
-      alert("✅ Maestro agregado correctamente a la lista.");
+      // Se quitó el alert() molesto, la UI lo reflejará solo.
     } catch (error) {
       console.error(error);
-      alert("❌ Error al agregar maestro.");
+      setErrorModalMaestro("❌ Error de conexión al agregar maestro.");
     }
     setCargando(false);
   };
@@ -418,12 +450,32 @@ function App() {
     sessionStorage.setItem("colorTemaFime", colorTema);
   }, [pantallaActual, esAdmin, numEmpleado, nombreMaestro, colorTema]);
 
-  // === CORRECCIÓN VITAL: CACHÉ DE SESIÓN PARA AHORRAR LECTURAS ===
+    // === EVENTOS EN TIEMPO REAL (solo con sesión iniciada) ===
+  const necesitaEventos =
+    !!numEmpleado &&
+    pantallaActual !== "validacion" &&
+    pantallaActual !== "confirmar_asistencia";
+
   useEffect(() => {
-    // Solo vamos a Firebase si no tenemos los datos en la memoria RAM (estado)
-    if (listaEventos.length === 0) obtenerEventos("publico");
-    if (listaEventosInternos.length === 0) obtenerEventos("interno");
-      }, [esAdmin]);
+    if (!necesitaEventos) return;
+
+    const mapear = (snapshot) =>
+      snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+
+    const unsubPublicos = db.collection("eventos_fime").onSnapshot(
+      (snap) => setListaEventos(mapear(snap)),
+      (err) => console.error("Error al escuchar eventos públicos:", err),
+    );
+    const unsubInternos = db.collection("eventos_internos_fime").onSnapshot(
+      (snap) => setListaEventosInternos(mapear(snap)),
+      (err) => console.error("Error al escuchar eventos internos:", err),
+    );
+
+    return () => {
+      unsubPublicos();
+      unsubInternos();
+    };
+  }, [necesitaEventos]);
 
   // Directorio: solo se descarga cuando una pantalla lo necesita
   useEffect(() => {
@@ -436,6 +488,29 @@ function App() {
       obtenerMaestros();
     }
   }, [esAdmin, pantallaActual]);
+
+
+    // === NUEVO: SINCRONIZACIÓN EN TIEMPO REAL DEL EVENTO SELECCIONADO ===
+  // Esto hace que el banner cambie de azul a naranja inmediatamente si el admin cambia la fecha
+  useEffect(() => {
+    if (eventoSeleccionado && pantallaActual === "detalle_evento") {
+      const eventoActualizado = [...listaEventos, ...listaEventosInternos].find(
+        (e) => e.id === eventoSeleccionado.id
+      );
+
+      if (!eventoActualizado) {
+        // Si el admin borró el evento por completo
+        setPantallaActual(esAdmin ? "admin_eventos" : "eventos");
+      } else if (
+        eventoSeleccionado.fecha !== eventoActualizado.fecha ||
+        eventoSeleccionado.hora !== eventoActualizado.hora
+      ) {
+        // Si el admin cambió la fecha u hora, actualizamos la tarjeta en vivo
+        setEventoSeleccionado(eventoActualizado);
+      }
+    }
+  }, [listaEventos, listaEventosInternos, eventoSeleccionado, pantallaActual, esAdmin]);
+
 
   // === EFECTOS EN TIEMPO REAL (ADIÓS AL F5 Y RETRASOS) ===
   useEffect(() => {
@@ -489,31 +564,28 @@ function App() {
         });
     }
 
-    // 3. Tiempo real para el USUARIO
-    if (!esAdmin && numEmpleado && pantallaActual !== "validacion") {
-      // 3.1 Escuchador Global: Descarga todas las invitaciones de este usuario
-      unsubscribeUsuario = db
-        .collection("pre_asistencias")
-        .where("numEmpleado", "==", String(numEmpleado).trim())
-        .onSnapshot((snapshot) => {
-          // Extraemos solo los IDs de los eventos a los que lo invitaron
-          const invitaciones = snapshot.docs.map((doc) => doc.data().eventoId);
-          setMisInvitaciones(invitaciones);
-        });
-
-      // 3.2 Escuchador Específico: Mantiene viva la pantalla de Detalles del Evento
-      if (pantallaActual === "detalle_evento" && eventoSeleccionado) {
-        unsubscribePre = db
+    /// 3.1 Escuchador Global: Descarga todas las invitaciones de este usuario
+      if (numEmpleado && !esAdmin) {
+        unsubscribeUsuario = db
           .collection("pre_asistencias")
-          .where("eventoId", "==", eventoSeleccionado.id)
+          .where("numEmpleado", "==", String(numEmpleado).trim())
           .onSnapshot((snapshot) => {
-            const listaPre = snapshot.docs.map((doc) =>
-              String(doc.data().numEmpleado).trim(),
-            );
-            setPreRegistradosEvento(listaPre);
+            // Extraemos solo los IDs de los eventos a los que lo invitaron
+            const invitaciones = snapshot.docs.map((doc) => doc.data().eventoId);
+            
+            setMisInvitaciones(invitaciones);
+
+            // NUEVO: Si el maestro está viendo la tarjeta de un evento interno y el admin borra la lista, lo expulsa.
+            if (
+              pantallaActual === "detalle_evento" &&
+              eventoSeleccionado &&
+              eventoSeleccionado.tipo === "interno" &&
+              !invitaciones.includes(eventoSeleccionado.id)
+            ) {
+              setPantallaActual("eventos");
+            }
           });
       }
-    }
 
     return () => {
       if (unsubscribePre) unsubscribePre();
@@ -638,13 +710,8 @@ function App() {
             await batch.commit();
           }
 
-          // CORRECCIÓN VITAL: Refrescamos la memoria localmente SIN reactivar el bucle hacia Firebase
-          setListaEventos((prev) =>
-            prev.filter((ev) => !eventosParaBorrar.some((b) => b.id === ev.id)),
-          );
-          setListaEventosInternos((prev) =>
-            prev.filter((ev) => !eventosParaBorrar.some((b) => b.id === ev.id)),
-          );
+          // --- CORRECCIÓN: Dejamos que el onSnapshot actualice la UI automáticamente ---
+          // Al borrar en Firebase, el listener en tiempo real refresca la memoria de forma segura.
         } catch (error) {
           console.error("Error en autodestrucción:", error);
         }
@@ -692,24 +759,6 @@ function App() {
     }
   };
 
-  const obtenerEventos = async (tipo = "publico") => {
-    try {
-      const coleccion =
-        tipo === "interno" ? "eventos_internos_fime" : "eventos_fime";
-      const snapshot = await db.collection(coleccion).get();
-      const eventosArreglo = snapshot.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-      }));
-      if (tipo === "interno") {
-        setListaEventosInternos(eventosArreglo);
-      } else {
-        setListaEventos(eventosArreglo);
-      }
-    } catch (err) {
-      console.error("Error al traer eventos:", err);
-    }
-  };
 
   const manejarValidacion = async (e) => {
     e.preventDefault();
@@ -834,6 +883,10 @@ function App() {
     setColorTema("bg-fime-main");
     setMisInvitaciones([]);
     setEventoSeleccionado(null);
+    
+    // --- CORRECCIÓN: Liberar memoria y limpiar URL para no atrapar al usuario ---
+    setQrEventoId(null);
+    window.history.replaceState({}, document.title, window.location.pathname);
   };
 
   const navegarA = (pantalla) => {
@@ -1234,6 +1287,23 @@ function App() {
       setMostrarPopupErrorFecha(true);
       return;
     }
+    
+    // 1b. En eventos de un solo día, la hora de fin debe ser posterior a la de inicio
+    const terminaElMismoDia =
+      !formEvento.esMultiDia ||
+      !formEvento.fechaFin ||
+      formEvento.fechaFin === formEvento.fecha;
+    if (
+      formEvento.hora &&
+      formEvento.horaFin &&
+      terminaElMismoDia &&
+      formEvento.horaFin <= formEvento.hora
+    ) {
+      alert(
+        "⚠️ La hora de fin debe ser posterior a la hora de inicio. Corrige la hora de fin para que el evento no termine antes de empezar.",
+      );
+      return;
+    }
 
     // 2. BLINDAJE EXTRA PARA EVENTOS MULTIDÍA
     if (formEvento.esMultiDia && formEvento.fechaFin) {
@@ -1245,12 +1315,17 @@ function App() {
         return;
       }
     }
+    
+    // MODIFICACIÓN: Ahora pide confirmación para AMBOS tipos de evento, avisando del borrado.
     if (editandoEventoId) {
       const confirmacion = window.confirm(
-        "⚠️ Al modificar este evento, se borrarán las pre-asistencias actuales. ¿Deseas continuar?",
+        formEvento.tipo === "interno"
+          ? "⚠️ Al modificar este evento interno, se borrará la lista de invitados actual y deberás volver a subirla. ¿Deseas continuar?"
+          : "⚠️ Al modificar este evento, se borrarán las pre-asistencias actuales. ¿Deseas continuar?"
       );
       if (!confirmacion) return;
     }
+    
     setCargando(true);
 
     // Definir a qué colección se va a guardar según su tipo
@@ -1266,13 +1341,15 @@ function App() {
             titulo: formEvento.titulo,
             descripcion: formEvento.descripcion,
             fecha: formEvento.fecha,
-            fechaFin: formEvento.fechaFin || "", // NUEVO
+            fechaFin: formEvento.fechaFin || "", 
             hora: formEvento.hora,
-            horaFin: formEvento.horaFin || "", // NUEVO
-            esMultiDia: formEvento.esMultiDia || false, // NUEVO
+            horaFin: formEvento.horaFin || "", 
+            esMultiDia: formEvento.esMultiDia || false, 
             portada: formEvento.portada,
             tipo: formEvento.tipo,
           });
+          
+        // MODIFICACIÓN: Ya no filtramos por tipo, ahora borramos las pre-asistencias de CUALQUIER evento editado.
         const snapshotPre = await db
           .collection("pre_asistencias")
           .where("eventoId", "==", editandoEventoId)
@@ -1286,26 +1363,29 @@ function App() {
             await batch.commit();
           }
         }
+        
+        // MODIFICACIÓN: Mensaje adaptado para recordarle al admin subir la lista de nuevo
         alert(
-          "✅ ¡Evento actualizado y pre-asistencias reiniciadas con éxito!",
+          formEvento.tipo === "interno"
+            ? "✅ Evento interno actualizado. La lista de invitados fue borrada, por favor súbela nuevamente."
+            : "✅ ¡Evento actualizado y pre-asistencias reiniciadas con éxito!",
         );
       } else {
         await db.collection(coleccionDestino).add({
           titulo: formEvento.titulo,
           descripcion: formEvento.descripcion,
           fecha: formEvento.fecha,
-          fechaFin: formEvento.fechaFin || "", // NUEVO
+          fechaFin: formEvento.fechaFin || "", 
           hora: formEvento.hora,
-          horaFin: formEvento.horaFin || "", // NUEVO
-          esMultiDia: formEvento.esMultiDia || false, // NUEVO
+          horaFin: formEvento.horaFin || "", 
+          esMultiDia: formEvento.esMultiDia || false, 
           portada: formEvento.portada,
           tipo: formEvento.tipo || "publico",
           creado: firebase.firestore.FieldValue.serverTimestamp(),
         });
       }
 
-      obtenerEventos("publico");
-      obtenerEventos("interno");
+      
       setFormEvento({
         titulo: "",
         descripcion: "",
@@ -1371,8 +1451,6 @@ function App() {
         alert(
           "🗑️ El evento y todas sus firmas han sido eliminados permanentemente de la base de datos.",
         );
-        obtenerEventos("publico");
-        obtenerEventos("interno");
         setEditandoEventoId(null);
 
         // Redirigimos a su pantalla correspondiente
@@ -1387,6 +1465,46 @@ function App() {
       setCargando(false);
     }
   };
+
+
+  const eliminarEventoDesdeTarjeta = async (eventoAEliminar) => {
+    const confirmacion = window.confirm(
+      `⚠️ ¿Estás seguro de eliminar PERMANENTEMENTE el evento "${eventoAEliminar.titulo}" del historial?`
+    );
+    if (!confirmacion) return;
+    
+    setCargando(true);
+    try {
+      const coleccionDestino =
+        eventoAEliminar.tipo === "interno" ? "eventos_internos_fime" : "eventos_fime";
+
+      // 1. Borramos el documento principal
+      await db.collection(coleccionDestino).doc(eventoAEliminar.id).delete();
+
+      // 2. Limpieza profunda: Borrar rastros de asistencias
+      const refsABorrar = [];
+      const preSnap = await db.collection("pre_asistencias").where("eventoId", "==", eventoAEliminar.id).get();
+      preSnap.docs.forEach((doc) => refsABorrar.push(doc.ref));
+
+      const asisSnap = await db.collection("asistencias").where("eventoId", "==", eventoAEliminar.id).get();
+      asisSnap.docs.forEach((doc) => refsABorrar.push(doc.ref));
+
+      const CHUNK_SIZE = 490;
+      for (let i = 0; i < refsABorrar.length; i += CHUNK_SIZE) {
+        const chunk = refsABorrar.slice(i, i + CHUNK_SIZE);
+        const batch = db.batch();
+        chunk.forEach((ref) => batch.delete(ref));
+        await batch.commit();
+      }
+
+      alert("🗑️ Evento histórico eliminado permanentemente.");
+      // Firebase actualizará la pantalla automáticamente en vivo
+    } catch (err) {
+      alert("❌ Error al eliminar el evento: " + err.message);
+    }
+    setCargando(false);
+  };
+
 
   const prepararEdicionEvento = (evento) => {
     setFormEvento({
@@ -2451,82 +2569,83 @@ function App() {
                       {eventoSeleccionado?.titulo}
                     </h2>
                   </div>
-                  <div className="flex gap-2 relative">
-                    {eventoSeleccionado?.tipo === "interno" &&
-                      !esEventoCaducado(eventoSeleccionado) && (
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={() => setMostrarModalAgregarMaestro(true)}
-                            className="bg-purple-100 text-purple-700 border border-purple-200 hover:bg-purple-200 px-3 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
-                          >
-                            ➕ Maestro Manual
-                          </button>
-                          <button
-                            onClick={cargarTodosLosMaestrosEventoInterno}
-                            disabled={cargando}
-                            className="bg-indigo-100 text-indigo-700 border border-indigo-200 hover:bg-indigo-200 px-3 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
-                          >
-                            👥 Cargar Todos
-                          </button>
-                          <label className="bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 px-3 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center cursor-pointer">
-                            <span>📁 Subir Excel</span>
-                            <input
-                              type="file"
-                              accept=".xlsx, .xls"
-                              onChange={procesarArchivoLista}
-                              className="hidden"
-                            />
-                          </label>
-                          {preRegistradosEvento &&
-                            preRegistradosEvento.length > 0 && (
-                              <button
-                                onClick={eliminarExcelCargado}
-                                disabled={cargando}
-                                className="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 px-3 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center"
-                              >
-                                🗑️ Vaciar
-                              </button>
-                            )}
-                        </div>
-                      )}
-
-                    <div className="relative">
-                      <button
-                        onClick={() =>
-                          setMenuDescargaAbierto(!menuDescargaAbierto)
-                        }
-                        className="bg-gray-800 text-white px-4 py-2 rounded-lg text-sm font-bold shadow-sm"
-                      >
-                        📥 Descargar ▼
-                      </button>
-                      {menuDescargaAbierto && (
-                        <div className="absolute right-0 mt-2 w-48 bg-white border border-gray-200 rounded-lg shadow-xl overflow-hidden z-50">
-                          <button
-                            onClick={() => exportarLista("xlsx")}
-                            className="w-full text-left px-4 py-3 hover:bg-gray-100 text-sm font-bold text-green-700"
-                          >
-                            📊 Como Excel (.xlsx)
-                          </button>
-                          <button
-                            onClick={() => exportarLista("pdf")}
-                            className="w-full text-left px-4 py-3 hover:bg-gray-100 text-sm font-bold text-red-600"
-                          >
-                            📄 Como PDF
-                          </button>
-                        </div>
-                      )}
-                    </div>
+                  {/* BOTÓN DESCARGAR: Se queda solo arriba a la derecha */}
+                  <div className="relative">
+                    <button
+                      onClick={() => setMenuDescargaAbierto(!menuDescargaAbierto)}
+                      className="bg-gray-800 text-white px-4 py-2.5 rounded-lg text-sm font-bold shadow-sm flex items-center gap-2"
+                    >
+                      <span className="text-lg">📥</span> Descargar ▼
+                    </button>
+                    {menuDescargaAbierto && (
+                      <div className="absolute right-0 mt-2 w-48 bg-white border border-gray-200 rounded-lg shadow-xl overflow-hidden z-50">
+                        <button onClick={() => exportarLista("xlsx")} className="w-full text-left px-4 py-3 hover:bg-gray-100 text-sm font-bold text-green-700">
+                          📊 Como Excel (.xlsx)
+                        </button>
+                        <button onClick={() => exportarLista("pdf")} className="w-full text-left px-4 py-3 hover:bg-gray-100 text-sm font-bold text-red-600">
+                          📄 Como PDF
+                        </button>
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                {/* NUEVO: BARRA DE BÚSQUEDA EN EL EVENTO */}
-                <input
-                  type="text"
-                  value={busquedaAsistencias}
-                  onChange={(e) => setBusquedaAsistencias(e.target.value)}
-                  placeholder="🔍 Buscar maestro por nombre o número"
-                  className="w-full mb-4 px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-sky-400 outline-none"
-                />
+                {/* --- EL SÁNDWICH --- */}
+                <div className="bg-white p-3 rounded-xl shadow-sm border border-gray-200 mb-4 flex flex-col gap-3">
+                  {/* CAPA 1: BOTONES DE ACCIÓN (Toolbar alargada) */}
+                  {!esEventoCaducado(eventoSeleccionado) && (
+                    <div className="flex flex-wrap gap-2 items-center">
+                      <button
+                        onClick={() => {
+                          setErrorModalMaestro(""); // Limpia errores al abrir
+                          setMostrarModalAgregarMaestro(true);
+                        }}
+                        className="bg-purple-100 text-purple-700 border border-purple-200 hover:bg-purple-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center gap-2"
+                      >
+                        ➕ Maestro Manual
+                      </button>
+
+                      {eventoSeleccionado?.tipo === "interno" && (
+                        <>
+                          <button
+                            onClick={cargarTodosLosMaestrosEventoInterno}
+                            disabled={cargando}
+                            className="bg-indigo-100 text-indigo-700 border border-indigo-200 hover:bg-indigo-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center gap-2"
+                          >
+                            👥 Cargar Todos
+                          </button>
+                          <label className="bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center cursor-pointer gap-2 m-0">
+                            <span>📁 Subir Excel</span>
+                            <input type="file" accept=".xlsx, .xls" onChange={procesarArchivoLista} className="hidden" />
+                          </label>
+                          {preRegistradosEvento && preRegistradosEvento.length > 0 && (
+                            <button
+                              onClick={eliminarExcelCargado}
+                              disabled={cargando}
+                              className="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center gap-2 ml-auto"
+                            >
+                              🗑️ Vaciar
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* CAPA 2: BUSCADOR */}
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                      <span className="text-gray-400">🔍</span>
+                    </div>
+                    <input
+                      type="text"
+                      value={busquedaAsistencias}
+                      onChange={(e) => setBusquedaAsistencias(e.target.value)}
+                      placeholder="Buscar maestro por nombre o número..."
+                      className="w-full pl-10 pr-4 py-2.5 bg-gray-50 border border-gray-300 rounded-lg focus:ring-2 focus:ring-sky-400 focus:bg-white outline-none transition-all text-sm"
+                    />
+                  </div>
+                </div>
 
                 <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex-1 overflow-hidden flex flex-col">
                   {/* VARIABLE QUE CALCULA LOS DÍAS EN VIVO */}
@@ -2652,15 +2771,22 @@ function App() {
             )}
 
           {mostrarModalAgregarMaestro && (
-            <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-              <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm p-6 transform transition-all">
+            <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-7 transform transition-all">
+                <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-purple-100 mb-3 shadow-inner">
+                  <span className="text-2xl">➕</span>
+                </div>
                 <h3 className="text-xl font-extrabold text-gray-800 mb-4 text-center">
-                  Agregar Maestro Manual
+                  Agregar Maestro
                 </h3>
-                <form
-                  onSubmit={agregarMaestroManualEvento}
-                  className="space-y-4"
-                >
+                
+                {errorModalMaestro && (
+                  <div className="mb-4 bg-red-50 border-l-4 border-red-500 p-3 rounded-r-lg text-sm text-red-700 font-medium animate-in slide-in-from-top-2">
+                    {errorModalMaestro}
+                  </div>
+                )}
+
+                <form onSubmit={agregarMaestroManualEvento} className="space-y-5">
                   <div>
                     <label className="block text-sm font-bold text-gray-700 mb-1">
                       No. Empleado
@@ -2668,34 +2794,21 @@ function App() {
                     <input
                       type="text"
                       value={formNuevoMaestro.id}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        setErrorModalMaestro(""); // Oculta el error al escribir
                         setFormNuevoMaestro({
                           ...formNuevoMaestro,
                           id: e.target.value,
-                        })
-                      }
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-400 outline-none"
+                        });
+                      }}
+                      className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-400 outline-none transition-all font-semibold text-gray-700"
                       placeholder="Ej. 123456"
                       required
+                      autoFocus
                     />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-1">
-                      Nombre Completo
-                    </label>
-                    <input
-                      type="text"
-                      value={formNuevoMaestro.nombreCompleto}
-                      onChange={(e) =>
-                        setFormNuevoMaestro({
-                          ...formNuevoMaestro,
-                          nombreCompleto: e.target.value,
-                        })
-                      }
-                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-400 outline-none"
-                      placeholder="Nombre del docente"
-                      required
-                    />
+                    <p className="text-xs text-gray-500 mt-2">
+                      El sistema buscará su nombre automáticamente.
+                    </p>
                   </div>
                   <div className="flex gap-3 pt-2">
                     <button
@@ -3159,12 +3272,28 @@ function App() {
                     />
                   </div>
 
-                  <div className="flex justify-end gap-3 pt-2">
+                  <div className="flex justify-between items-center w-full pt-4 mt-2 border-t border-gray-100">
+                    {/* BOTÓN ELIMINAR: Alineado a la izquierda (Solo aparece al editar) */}
+                    {editandoEventoId ? (
+                      <button
+                        type="button"
+                        onClick={eliminarEvento}
+                        disabled={cargando}
+                        className="bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 font-bold px-4 py-2.5 rounded-lg text-sm transition-all shadow-sm flex items-center gap-2"
+                      >
+                        🗑️ Eliminar Permanente
+                      </button>
+                    ) : (
+                      <div></div> /* Div invisible para empujar el botón de guardar a la derecha si es un evento nuevo */
+                    )}
+
+                    {/* BOTÓN GUARDAR: Alineado a la derecha */}
                     <button
                       type="submit"
+                      disabled={cargando}
                       className="bg-sky-600 hover:bg-sky-700 text-white font-bold px-6 py-2.5 rounded-lg text-sm shadow-sm transition-all"
                     >
-                      Guardar Evento
+                      {cargando ? "Guardando..." : "Guardar Evento"}
                     </button>
                   </div>
                 </form>
@@ -3408,14 +3537,23 @@ function App() {
                                   >
                                     👁️ Ver Archivo Histórico
                                   </button>
-                                  <button
-                                    onClick={() =>
-                                      prepararReutilizacionEvento(evento)
-                                    }
-                                    className="w-full bg-emerald-600 text-white py-2.5 rounded-lg font-bold hover:bg-emerald-700 transition-all text-sm flex justify-center items-center gap-2 shadow-sm"
-                                  >
-                                    🔄 Volver a cargar evento
-                                  </button>
+                                  
+                                  {/* BOTONES DIVIDIDOS: Clonar y Borrar */}
+                                  <div className="flex gap-2">
+                                    <button
+                                      onClick={() => prepararReutilizacionEvento(evento)}
+                                      className="flex-1 bg-emerald-600 text-white py-2.5 rounded-lg font-bold hover:bg-emerald-700 transition-all text-sm flex justify-center items-center gap-2 shadow-sm"
+                                    >
+                                      🔄 Clonar
+                                    </button>
+                                    <button
+                                      onClick={() => eliminarEventoDesdeTarjeta(evento)}
+                                      disabled={cargando}
+                                      className="flex-1 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 py-2.5 rounded-lg font-bold transition-all text-sm flex justify-center items-center gap-2 shadow-sm"
+                                    >
+                                      🗑️ Borrar
+                                    </button>
+                                  </div>
                                 </div>
                               </>
                             ) : (
