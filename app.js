@@ -649,13 +649,12 @@ function App() {
     };
 
     const eventosUsuario = [
-      "mousemove",
       "keydown",
       "click",
-      "scroll",
       "touchstart",
     ];
-    eventosUsuario.forEach((evt) => window.addEventListener(evt, resetTimer));
+    // Se eliminó 'scroll' y 'mousemove' para evitar el lag masivo al deslizar en celulares
+    eventosUsuario.forEach((evt) => window.addEventListener(evt, resetTimer, { passive: true }));
 
     resetTimer(); // Iniciar primer conteo
 
