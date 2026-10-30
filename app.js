@@ -651,9 +651,8 @@ function App() {
     const eventosUsuario = [
       "keydown",
       "click",
-      "touchstart",
     ];
-    // Se eliminó 'scroll' y 'mousemove' para evitar el lag masivo al deslizar en celulares
+    // Dejamos SOLO el click. Un tap en el celular cuenta como click, así el navegador puede usar el 100% de la memoria en deslizar la pantalla suavemente.
     eventosUsuario.forEach((evt) => window.addEventListener(evt, resetTimer, { passive: true }));
 
     resetTimer(); // Iniciar primer conteo
@@ -2215,7 +2214,7 @@ function App() {
   // PANTALLAS CON MENÚ LATERAL (SISTEMA INTERNO)
   // ==============================================================
   return (
-    <div className="flex h-screen bg-gray-100 overflow-hidden relative">
+    <div className="flex h-[100dvh] w-full bg-gray-100 overflow-hidden relative overscroll-none">
       {menuAbierto && (
         <div
           className="fixed inset-0 bg-black/50 z-30 md:hidden"
@@ -2345,8 +2344,11 @@ function App() {
         </div>
       </aside>
 
-      <main className="flex-1 overflow-y-auto flex flex-col h-full bg-gray-50">
-        <header className="md:hidden bg-white shadow-sm p-4 flex items-center justify-between">
+      <main 
+        className="flex-1 overflow-y-auto overflow-x-hidden flex flex-col bg-gray-50 relative"
+        style={{ WebkitOverflowScrolling: 'touch' }}
+      >
+        <header className="md:hidden bg-white shadow-sm p-4 flex items-center justify-between shrink-0">
           <div className="flex items-center space-x-2">
             <div
               className={`w-8 h-8 ${themeBg} rounded-full flex items-center justify-center text-white font-bold text-xs`}
