@@ -592,8 +592,8 @@ function App() {
       if (unsubscribeAsis) unsubscribeAsis();
       if (unsubscribeUsuario) unsubscribeUsuario();
     };
-    // ELIMINADO 'pantallaActual'. Solo recargamos Firebase si cambia el evento o el usuario.
-  }, [eventoSeleccionado, esAdmin, numEmpleado, pantallaActual === "validacion"]);
+    // CORRECCIÓN: 'pantallaActual' DEBE estar aquí para que la base de datos despierte al abrir la tabla
+  }, [eventoSeleccionado, esAdmin, numEmpleado, pantallaActual]);
 
     // === COLOR DEL ADMIN PARA EVENTOS INTERNOS ===
   useEffect(() => {
