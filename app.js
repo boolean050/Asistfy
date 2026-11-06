@@ -165,6 +165,19 @@ function App() {
     "bg-blue-800",
     "bg-fime-main",
   ];
+  // NUEVO: Paleta de 10 colores vibrantes y llamativos exclusivos para Tablas
+  const coloresTablas = [
+    "bg-red-500",
+    "bg-rose-500",
+    "bg-fuchsia-500",
+    "bg-purple-500",
+    "bg-indigo-500",
+    "bg-blue-500",
+    "bg-cyan-500",
+    "bg-emerald-500",
+    "bg-lime-500",
+    "bg-amber-500"
+  ];
   //AQUI SE HIZO EL PRIMER ERROR
 
   const [esAdmin, setEsAdmin] = useState(() => {
@@ -235,6 +248,27 @@ function App() {
   });
   const [errorModalMaestro, setErrorModalMaestro] = useState("");
   const [resaltarFechas, setResaltarFechas] = useState(false); // Para el efecto visual al clonar
+
+  // === NUEVOS ESTADOS PARA GESTIÓN DE TABLAS ===
+  const [mostrarModalCrearTabla, setMostrarModalCrearTabla] = useState(false);
+  const [mostrarModalImportarTabla, setMostrarModalImportarTabla] = useState(false);
+  const [menuAccionesMovil, setMenuAccionesMovil] = useState(false);
+  const [listaDeTablasPersonalizadas, setListaDeTablasPersonalizadas] = useState([]);
+  
+  // Estado para el formulario del modal bonito
+  const [formNuevaTabla, setFormNuevaTabla] = useState({
+    nombre: "",
+    color: "bg-cyan-500", // Color vibrante por defecto
+    columnasManuales: "",
+    archivo: null
+  });
+
+  // ESTADOS PARA ÉXITO Y EDICIÓN DE TABLA PERSONALIZADA
+  const [modalExitoTabla, setModalExitoTabla] = useState({ visible: false, tablaId: null, nombre: "", maestros: [] });
+  const [tablaPersonalizadaEnEdicion, setTablaPersonalizadaEnEdicion] = useState(null);
+  const [filasTablaPersonalizada, setFilasTablaPersonalizada] = useState([]);
+
+  
 
   // === CÁLCULO DE DÍAS PARA EVENTOS MULTI-DÍA ===
   const calcularDiasEvento = (fechaInicio, fechaFin, esMultiDia) => {
@@ -471,9 +505,20 @@ function App() {
       (err) => console.error("Error al escuchar eventos internos:", err),
     );
 
+    // NUEVO: Escuchador en vivo de las Tablas Personalizadas (Solo se activa si es Admin)
+    const unsubTablas = esAdmin
+      ? db.collection("tablas_maestros")
+          .orderBy("creadaEl", "desc")
+          .onSnapshot(
+            (snap) => setListaDeTablasPersonalizadas(mapear(snap)),
+            (err) => console.error("Error al escuchar tablas:", err)
+          )
+      : () => {};
+
     return () => {
       unsubPublicos();
       unsubInternos();
+      unsubTablas();
     };
   }, [necesitaEventos]);
 
@@ -810,6 +855,15 @@ function App() {
           if (esEventoCaducado(eventoData)) {
             setError(
               "⏳ Este evento ya ha finalizado. No se aceptan más registros de asistencia.",
+            );
+            setCargando(false);
+            return;
+          }
+
+          // BLINDAJE ANTI-VIAJEROS: Bloquear si el evento aún no inicia
+          if (esEventoFuturo(eventoData.fecha)) {
+            setError(
+              "⏳ Este evento aún no comienza. Podrás registrar tu asistencia el día del evento.",
             );
             setCargando(false);
             return;
@@ -1407,6 +1461,277 @@ function App() {
     setCargando(false);
   };
 
+
+  // === FASE 3: LÓGICA INTELIGENTE DE TABLAS Y SINCRONIZACIÓN ===
+  const guardarNuevaTabla = async () => {
+    if (!formNuevaTabla.nombre.trim()) {
+      alert("⚠️ Por favor, asigna un nombre a la tabla.");
+      return;
+    }
+    setCargando(true);
+
+    try {
+      let maestrosExtraidos = [];
+      let columnasExtraidas = ["ID USUARIO", "NOMBRE DEL DOCENTE"];
+
+      // PROCESAR EXCEL SI HAY UNO
+      if (formNuevaTabla.archivo) {
+        const procesarExcel = () => new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (evt) => {
+            try {
+              const bstr = evt.target.result;
+              const wb = XLSX.read(bstr, { type: "binary" });
+              const wsname = wb.SheetNames[0];
+              const filas = XLSX.utils.sheet_to_json(wb.Sheets[wsname], { header: 1 });
+              
+              const normalizar = (texto) => String(texto).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+              let idxFilaTitulos = -1, idxColEmp = -1, idxColNom = -1;
+
+              for (let i = 0; i < Math.min(10, filas.length); i++) {
+                const fila = filas[i];
+                if (!fila || fila.length === 0) continue;
+                idxColEmp = fila.findIndex(c => c && (normalizar(c).includes("empleado") || normalizar(c).includes("matricula") || normalizar(c).includes("id usuario") || normalizar(c) === "id"));
+                idxColNom = fila.findIndex(c => c && (normalizar(c).includes("nombre") || normalizar(c).includes("docente") || normalizar(c).includes("maestro")));
+                
+                if (idxColNom !== -1) {
+                  idxFilaTitulos = i;
+                  break;
+                }
+              }
+
+              if (idxFilaTitulos !== -1) {
+                // Si no detectó columna de ID por nombre, revisamos si alguna columna tiene números de 4 a 8 dígitos
+                if (idxColEmp === -1) {
+                  const filaMuestra = filas.slice(idxFilaTitulos + 1).find(f => f && f.length > 0);
+                  if (filaMuestra) {
+                    idxColEmp = filaMuestra.findIndex((celda, idx) => idx !== idxColNom && celda !== undefined && /^\d{4,8}$/.test(String(celda).trim()));
+                  }
+                }
+
+                let columnasExcel = filas[idxFilaTitulos].map(c => String(c || "").trim()).filter(Boolean);
+                columnasExtraidas = idxColEmp === -1 ? ["ID USUARIO", ...columnasExcel] : columnasExcel;
+
+                for (let i = idxFilaTitulos + 1; i < filas.length; i++) {
+                  if (!filas[i]) continue;
+                  const rawEmp = idxColEmp !== -1 ? String(filas[i][idxColEmp] ?? "").trim() : "";
+                  // Validamos que el ID tenga entre 4 y 8 caracteres; si no, queda vacío para asignarle uno
+                  const idValido = rawEmp.length >= 4 && rawEmp.length <= 8 ? rawEmp : "";
+                  const nom = filas[i][idxColNom];
+                  if (nom && String(nom).trim() !== "") {
+                    maestrosExtraidos.push({
+                      id: idValido,
+                      nombreCompleto: String(nom).trim()
+                    });
+                  }
+                }
+                resolve();
+              } else {
+                reject("No se encontró una columna de 'Nombre' en el Excel.");
+              }
+            } catch (e) {
+              reject(e);
+            }
+          };
+          reader.readAsBinaryString(formNuevaTabla.archivo);
+        });
+        await procesarExcel();
+      }
+
+      // Si el usuario escribió columnas manuales, las respetamos asegurando el ID al principio
+      if (formNuevaTabla.columnasManuales.trim()) {
+        const manuales = formNuevaTabla.columnasManuales.split(",").map(c => c.trim()).filter(Boolean);
+        const tieneId = manuales.some(c => {
+          const norm = c.toLowerCase();
+          return norm.includes("empleado") || norm.includes("matricula") || norm.includes("id");
+        });
+        columnasExtraidas = tieneId ? manuales : ["ID USUARIO", ...manuales];
+      }
+
+      // GUARDAR EN FIREBASE (Colección tablas_maestros)
+      const docRef = await db.collection("tablas_maestros").add({
+        nombre: formNuevaTabla.nombre.trim(),
+        color: formNuevaTabla.color,
+        columnas: columnasExtraidas,
+        maestros: maestrosExtraidos,
+        creadaEl: firebase.firestore.FieldValue.serverTimestamp()
+      });
+
+      // Si ya venían maestros con ID válido en el Excel, los sincronizamos de una vez al Directorio General
+      const maestrosConId = maestrosExtraidos.filter(m => m.id && m.id.trim() !== "");
+      if (maestrosConId.length > 0) {
+        const CHUNK_SIZE = 490;
+        for (let i = 0; i < maestrosConId.length; i += CHUNK_SIZE) {
+          const chunk = maestrosConId.slice(i, i + CHUNK_SIZE);
+          const batch = db.batch();
+          chunk.forEach((emp) => {
+            const idLimpio = String(emp.id).trim();
+            batch.set(db.collection("directorio_fime").doc(idLimpio), {
+              nombreCompleto: emp.nombreCompleto,
+              registrado: true,
+            }, { merge: true });
+          });
+          await batch.commit();
+        }
+        obtenerMaestros();
+      }
+
+      setMostrarModalCrearTabla(false);
+      setFormNuevaTabla({ nombre: "", color: "bg-cyan-500", columnasManuales: "", archivo: null });
+      setModalExitoTabla({ visible: true, tablaId: docRef.id, nombre: formNuevaTabla.nombre.trim(), maestros: maestrosExtraidos });
+
+    } catch (err) {
+      console.error(err);
+      alert(typeof err === "string" ? "⚠️ " + err : "❌ Error al crear la tabla. Verifica tus permisos en Firebase.");
+    }
+    setCargando(false);
+  };
+
+  const abrirEdicionTablaPersonalizada = (tablaId, nombre, maestros) => {
+    setTablaPersonalizadaEnEdicion({ id: tablaId, nombre: nombre });
+    setFilasTablaPersonalizada(JSON.parse(JSON.stringify(maestros || [])));
+    setModalExitoTabla({ visible: false, tablaId: null, nombre: "", maestros: [] });
+  };
+
+  const generarIdsAleatorios6Digitos = () => {
+    const confirmacion = window.confirm("⚡ ¿Generar un ID de 6 dígitos aleatorio para todos los campos vacíos?");
+    if (!confirmacion) return;
+
+    const idsUsados = new Set([
+      ...listaDirectorio.map(m => String(m.id).trim()),
+      ...filasTablaPersonalizada.map(m => String(m.id || "").trim()).filter(Boolean)
+    ]);
+
+    const nuevasFilas = filasTablaPersonalizada.map(m => {
+      if (!m.id || String(m.id).trim() === "") {
+        let idAleatorio = "";
+        do {
+          idAleatorio = Math.floor(100000 + Math.random() * 900000).toString();
+        } while (idsUsados.has(idAleatorio));
+        idsUsados.add(idAleatorio);
+        return { ...m, id: idAleatorio };
+      }
+      return m;
+    });
+    setFilasTablaPersonalizada(nuevasFilas);
+  };
+
+  const guardarCambiosTablaPersonalizada = async () => {
+    setCargando(true);
+    try {
+      const filasLimpias = filasTablaPersonalizada.filter(m => (m.id && String(m.id).trim() !== "") || (m.nombreCompleto && String(m.nombreCompleto).trim() !== ""));
+      const hayVacios = filasLimpias.some(m => !m.id || String(m.id).trim() === "" || !m.nombreCompleto || String(m.nombreCompleto).trim() === "");
+      
+      if (hayVacios) {
+        alert("⚠️ Todavía hay filas sin ID o sin Nombre. Usa el botón '⚡ Crear IDs Aleatorios' o complétalos manualmente antes de guardar.");
+        setCargando(false);
+        return;
+      }
+
+      // 1. Guardar en la colección de tablas
+      await db.collection("tablas_maestros").doc(tablaPersonalizadaEnEdicion.id).update({
+        maestros: filasLimpias
+      });
+
+      // 2. SINCRONIZACIÓN AUTOMÁTICA AL DIRECTORIO GENERAL (Por chunks de 490)
+      const CHUNK_SIZE = 490;
+      for (let i = 0; i < filasLimpias.length; i += CHUNK_SIZE) {
+        const chunk = filasLimpias.slice(i, i + CHUNK_SIZE);
+        const batch = db.batch();
+        chunk.forEach((emp) => {
+          const idLimpio = String(emp.id).trim();
+          const docRef = db.collection("directorio_fime").doc(idLimpio);
+          batch.set(docRef, {
+            nombreCompleto: emp.nombreCompleto.trim(),
+            registrado: true,
+          }, { merge: true });
+        });
+        await batch.commit();
+      }
+
+      await obtenerMaestros();
+      alert("✅ Tabla actualizada y todos los maestros fueron sincronizados al Directorio General listos para usar.");
+      setTablaPersonalizadaEnEdicion(null);
+
+    } catch (error) {
+      console.error(error);
+      alert("❌ Error al guardar los cambios.");
+    }
+    setCargando(false);
+  };
+
+  const importarTablaAlEvento = async (tabla) => {
+    if (!eventoSeleccionado) return;
+    if (!tabla.maestros || tabla.maestros.length === 0) {
+      alert("⚠️ Esta tabla está vacía. Edítala en 'Lista Maestros Registro' para agregar maestros.");
+      return;
+    }
+
+    const faltanIds = tabla.maestros.some(m => !m.id || String(m.id).trim() === "");
+    if (faltanIds) {
+      alert("⚠️ Algunos maestros en esta tabla aún no tienen ID Usuario asignado. Te abriremos el editor de la tabla para que les generes su ID de 6 dígitos con 1 clic.");
+      setMostrarModalImportarTabla(false);
+      abrirEdicionTablaPersonalizada(tabla.id, tabla.nombre, tabla.maestros);
+      return;
+    }
+
+    const confirmacion = window.confirm(`¿Estás seguro de importar a los ${tabla.maestros.length} maestros de "${tabla.nombre}" a este evento?`);
+    if (!confirmacion) return;
+
+    setCargando(true);
+    try {
+      const numEmpleadosNuevos = [];
+      // Usamos 240 porque hacemos 2 escrituras por maestro (directorio_fime + pre_asistencias = 480 operaciones por lote)
+      const CHUNK_SIZE = 240;
+      for (let i = 0; i < tabla.maestros.length; i += CHUNK_SIZE) {
+        const chunk = tabla.maestros.slice(i, i + CHUNK_SIZE);
+        const batch = db.batch();
+        chunk.forEach((maestro) => {
+          const idLimpio = String(maestro.id).trim();
+          const nombreLimpio = (maestro.nombreCompleto || "Sin Nombre").trim();
+
+          // Aseguramos que exista en el directorio general
+          const dirRef = db.collection("directorio_fime").doc(idLimpio);
+          batch.set(dirRef, { nombreCompleto: nombreLimpio, registrado: true }, { merge: true });
+
+          // Lo registramos en el evento
+          const docIdUnico = `${eventoSeleccionado.id}_${idLimpio}`;
+          const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
+          batch.set(preAsisRef, {
+            eventoId: eventoSeleccionado.id,
+            numEmpleado: idLimpio,
+            nombreMaestro: nombreLimpio,
+            fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
+          });
+          numEmpleadosNuevos.push(idLimpio);
+        });
+        await batch.commit();
+      }
+
+      setPreRegistradosEvento((prev) => [...new Set([...(prev || []), ...numEmpleadosNuevos])]);
+      await obtenerMaestros();
+      alert(`✅ Se importaron ${tabla.maestros.length} maestros de la tabla "${tabla.nombre}".`);
+      setMostrarModalImportarTabla(false);
+    } catch(error) {
+      console.error(error);
+      alert("❌ Error al importar la tabla.");
+    }
+    setCargando(false);
+  };
+
+  const eliminarTablaPersonalizada = async (idTabla, nombreTabla) => {
+    const confirmacion = window.confirm(`⚠️ ¿Estás seguro de eliminar PERMANENTEMENTE la tabla "${nombreTabla}"?`);
+    if (confirmacion) {
+      try {
+        await db.collection("tablas_maestros").doc(idTabla).delete();
+      } catch (err) {
+        console.error(err);
+        alert("❌ Error al eliminar la tabla.");
+      }
+    }
+  };
+
+  
   const eliminarEvento = async () => {
     if (!editandoEventoId) return;
     const confirmacion = window.confirm(
@@ -1532,6 +1857,17 @@ function App() {
     if (color.includes("orange")) return "bg-orange-900";
     if (color.includes("yellow")) return "bg-yellow-900";
     if (color.includes("blue")) return "bg-blue-900";
+    // Colores de Tablas Vibrantes
+    if (color.includes("red")) return "bg-red-900";
+    if (color.includes("rose")) return "bg-rose-900";
+    if (color.includes("fuchsia")) return "bg-fuchsia-900";
+    if (color.includes("purple")) return "bg-purple-900";
+    if (color.includes("indigo")) return "bg-indigo-900";
+    if (color.includes("blue")) return "bg-blue-900";
+    if (color.includes("cyan")) return "bg-cyan-900";
+    if (color.includes("emerald")) return "bg-emerald-900";
+    if (color.includes("lime")) return "bg-lime-900";
+    if (color.includes("amber")) return "bg-amber-900";
     return "bg-fime-dark";
   };
 
@@ -1550,6 +1886,17 @@ function App() {
     "bg-violet-400": "text-violet-400",
     "bg-fuchsia-600": "text-fuchsia-600",
     "bg-purple-600": "text-purple-600",
+    // Colores de Tablas Vibrantes
+    "bg-red-500": "text-red-500",
+    "bg-rose-500": "text-rose-500",
+    "bg-fuchsia-500": "text-fuchsia-500",
+    "bg-purple-500": "text-purple-500",
+    "bg-indigo-500": "text-indigo-500",
+    "bg-blue-500": "text-blue-500",
+    "bg-cyan-500": "text-cyan-500",
+    "bg-emerald-500": "text-emerald-500",
+    "bg-lime-500": "text-lime-500",
+    "bg-amber-500": "text-amber-500",
   };
   const themeTextColor = mapaTextoTema[colorTema] || "text-fime-main";
   const themeHover = "hover:brightness-90 transition-all";
@@ -2593,43 +2940,73 @@ function App() {
 
                 {/* --- EL SÁNDWICH --- */}
                 <div className="bg-white p-3 rounded-xl shadow-sm border border-gray-200 mb-4 flex flex-col gap-3">
-                  {/* CAPA 1: BOTONES DE ACCIÓN (Toolbar alargada) */}
+                  {/* CAPA 1: BOTONES DE ACCIÓN (Responsivo: Centrado en PC, Dropdown en Móvil) */}
                   {!esEventoCaducado(eventoSeleccionado) && (
-                    <div className="flex flex-wrap gap-2 items-center">
-                      <button
-                        onClick={() => {
-                          setErrorModalMaestro(""); // Limpia errores al abrir
-                          setMostrarModalAgregarMaestro(true);
-                        }}
-                        className="bg-purple-100 text-purple-700 border border-purple-200 hover:bg-purple-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center gap-2"
-                      >
-                        ➕ Maestro Manual
-                      </button>
+                    <div className="relative w-full">
+                      {/* --- VISTA MÓVIL: Botón Desplegable --- */}
+                      <div className="md:hidden mb-2">
+                        <button
+                          onClick={() => setMenuAccionesMovil(!menuAccionesMovil)}
+                          className="w-full bg-gray-800 text-white px-4 py-3 rounded-lg text-sm font-bold shadow-sm flex items-center justify-between"
+                        >
+                          <span>⚡ Acciones Rápidas</span>
+                          <span>{menuAccionesMovil ? "▲" : "▼"}</span>
+                        </button>
+                      </div>
 
-                      {eventoSeleccionado?.tipo === "interno" && (
-                        <>
+                      {/* --- VISTA PC (O Móvil si está desplegado) --- */}
+                      <div className={`${menuAccionesMovil ? "flex" : "hidden"} md:flex flex-col md:flex-row flex-wrap justify-center items-center gap-3 bg-gray-50 md:bg-transparent p-3 md:p-0 rounded-lg border md:border-none border-gray-200`}>
+                        <button
+                          onClick={() => {
+                            setErrorModalMaestro("");
+                            setMostrarModalAgregarMaestro(true);
+                            setMenuAccionesMovil(false);
+                          }}
+                          className="w-full md:w-auto bg-purple-100 text-purple-700 border border-purple-200 hover:bg-purple-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center justify-center gap-2"
+                        >
+                          ➕ Maestro Manual
+                        </button>
+
+                        {/* NUEVO BOTÓN: Importar Tabla */}
+                        <button
+                          onClick={() => {
+                            setMostrarModalImportarTabla(true);
+                            setMenuAccionesMovil(false);
+                          }}
+                          className="w-full md:w-auto bg-fuchsia-100 text-fuchsia-700 border border-fuchsia-200 hover:bg-fuchsia-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center justify-center gap-2"
+                        >
+                          📑 Importar Tabla
+                        </button>
+
+                        <button
+                          onClick={() => {
+                            cargarTodosLosMaestrosEventoInterno();
+                            setMenuAccionesMovil(false);
+                          }}
+                          disabled={cargando}
+                          className="w-full md:w-auto bg-indigo-100 text-indigo-700 border border-indigo-200 hover:bg-indigo-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center justify-center gap-2"
+                        >
+                          👥 Cargar Todos
+                        </button>
+
+                        <label className="w-full md:w-auto bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center justify-center cursor-pointer gap-2 m-0">
+                          <span>📁 Subir Excel</span>
+                          <input type="file" accept=".xlsx, .xls" onChange={(e) => { procesarArchivoLista(e); setMenuAccionesMovil(false); }} className="hidden" />
+                        </label>
+
+                        {preRegistradosEvento && preRegistradosEvento.length > 0 && (
                           <button
-                            onClick={cargarTodosLosMaestrosEventoInterno}
+                            onClick={() => {
+                              eliminarExcelCargado();
+                              setMenuAccionesMovil(false);
+                            }}
                             disabled={cargando}
-                            className="bg-indigo-100 text-indigo-700 border border-indigo-200 hover:bg-indigo-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center gap-2"
+                            className="w-full md:w-auto bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center justify-center gap-2 md:ml-auto"
                           >
-                            👥 Cargar Todos
+                            🗑️ Vaciar
                           </button>
-                          <label className="bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center cursor-pointer gap-2 m-0">
-                            <span>📁 Subir Excel</span>
-                            <input type="file" accept=".xlsx, .xls" onChange={procesarArchivoLista} className="hidden" />
-                          </label>
-                          {preRegistradosEvento && preRegistradosEvento.length > 0 && (
-                            <button
-                              onClick={eliminarExcelCargado}
-                              disabled={cargando}
-                              className="bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center gap-2 ml-auto"
-                            >
-                              🗑️ Vaciar
-                            </button>
-                          )}
-                        </>
-                      )}
+                        )}
+                      </div>
                     </div>
                   )}
 
@@ -2832,12 +3209,74 @@ function App() {
             </div>
           )}
 
+          {/* === MODAL BONITO: IMPORTAR TABLA AL EVENTO === */}
+          {mostrarModalImportarTabla && (
+            <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-7 transform transition-all flex flex-col max-h-[90vh]">
+                <div className="flex justify-between items-center mb-5 border-b border-gray-100 pb-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 bg-fuchsia-100 rounded-full flex items-center justify-center text-xl">📑</div>
+                    <h3 className="text-xl font-extrabold text-gray-800">Importar Tabla</h3>
+                  </div>
+                  <button onClick={() => setMostrarModalImportarTabla(false)} className="text-gray-400 hover:text-gray-600 text-2xl font-bold">&times;</button>
+                </div>
+
+                <div className="overflow-y-auto flex-1 pr-2 space-y-3 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300">
+                  {listaDeTablasPersonalizadas.length === 0 ? (
+                    <div className="text-center py-8 text-gray-500">
+                      <p className="text-3xl mb-3">📭</p>
+                      <p className="font-semibold">Aún no has creado ninguna tabla.</p>
+                      <p className="text-sm mt-1">Ve a "Lista Maestros Registro" para crear una.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-sm font-bold text-gray-700 mb-2">Selecciona la tabla que deseas cargar:</p>
+                      {listaDeTablasPersonalizadas.map(tabla => (
+                        <button
+                          key={tabla.id}
+                          onClick={() => importarTablaAlEvento(tabla)}
+                          disabled={cargando}
+                          className={`w-full text-left p-4 rounded-xl border border-gray-200 shadow-sm transition-all hover:-translate-y-1 hover:shadow-md flex items-center gap-4 ${tabla.color} hover:brightness-110 group`}
+                        >
+                          <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center text-white font-bold shrink-0">
+                            {tabla.maestros?.length || 0}
+                          </div>
+                          <div className="text-white">
+                            <p className="font-bold text-lg leading-tight">{tabla.nombre}</p>
+                            <p className="text-xs opacity-90">Hacer clic para importar</p>
+                          </div>
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </div>
+
+                <div className="pt-4 mt-4 border-t border-gray-100">
+                  <button
+                    onClick={() => setMostrarModalImportarTabla(false)}
+                    className="w-full bg-gray-200 text-gray-700 py-3 rounded-xl font-bold hover:bg-gray-300 transition-colors"
+                  >
+                    Cerrar
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {pantallaActual === "admin_maestros" && esAdmin && (
             <div className="flex flex-col h-full">
-              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-2xl md:text-3xl font-bold text-gray-800">
-                  Base de Datos General
-                </h2>
+              <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
+                <div className="flex items-center gap-3">
+                  <h2 className="text-2xl md:text-3xl font-bold text-gray-800">
+                    Gestor de Tablas
+                  </h2>
+                  <button
+                    onClick={() => setMostrarModalCrearTabla(true)}
+                    className="bg-indigo-600 text-white px-3 py-1.5 rounded-lg text-sm font-bold shadow-sm hover:bg-indigo-700 transition-colors flex items-center gap-1"
+                  >
+                    ✨ Crear Tabla
+                  </button>
+                </div>
 
                 {modoEdicion ? (
                   <div className="flex space-x-2">
@@ -2919,6 +3358,27 @@ function App() {
                   </div>
                 )}
               </div>
+
+              {/* === CARRUSEL DE TABLAS PERSONALIZADAS === */}
+              {listaDeTablasPersonalizadas.length > 0 && (
+                <div className="mb-6 bg-white p-4 rounded-xl shadow-sm border border-gray-200">
+                  <h3 className="text-sm font-bold text-gray-500 mb-3 uppercase tracking-wider">Tus Tablas Creadas</h3>
+                  <div className="flex gap-4 overflow-x-auto pb-2 [&::-webkit-scrollbar]:h-2 [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full">
+                    {listaDeTablasPersonalizadas.map((tabla) => (
+                      <div key={tabla.id} className={`shrink-0 w-64 ${tabla.color} rounded-xl p-4 text-white shadow-md relative group flex flex-col justify-between transition-transform hover:-translate-y-1`}>
+                        <div className="pr-16">
+                          <h4 className="font-bold text-lg leading-tight mb-1 truncate" title={tabla.nombre}>{tabla.nombre}</h4>
+                          <p className="text-xs opacity-90 font-medium">{tabla.maestros?.length || 0} maestros listos</p>
+                        </div>
+                        <div className="absolute top-2 right-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 flex gap-1 transition-all">
+                          <button onClick={() => abrirEdicionTablaPersonalizada(tabla.id, tabla.nombre, tabla.maestros)} className="bg-black/20 hover:bg-black/40 w-8 h-8 rounded-full flex items-center justify-center text-sm" title="Editar IDs de Tabla">✏️</button>
+                          <button onClick={() => eliminarTablaPersonalizada(tabla.id, tabla.nombre)} className="bg-black/20 hover:bg-red-500/80 w-8 h-8 rounded-full flex items-center justify-center text-sm" title="Eliminar Permanente">✕</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* NUEVO: BARRA DE BÚSQUEDA GENERAL */}
               <input
@@ -3094,6 +3554,231 @@ function App() {
                   </table>
                 </div>
               </div>
+
+              {/* === MODAL BONITO: CREAR NUEVA TABLA === */}
+              {mostrarModalCrearTabla && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
+                  <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-7 transform transition-all flex flex-col max-h-[90vh]">
+                    <div className="flex justify-between items-center mb-5 border-b border-gray-100 pb-3">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-xl">✨</div>
+                        <h3 className="text-xl font-extrabold text-gray-800">Crear Nueva Tabla</h3>
+                      </div>
+                      <button onClick={() => setMostrarModalCrearTabla(false)} className="text-gray-400 hover:text-gray-600 text-2xl font-bold">&times;</button>
+                    </div>
+
+                    <div className="overflow-y-auto flex-1 pr-2 space-y-5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full">
+                      {/* Nombre de la Tabla */}
+                      <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-1">Nombre de la Tabla <span className="text-red-500">*</span></label>
+                        <input
+                          type="text"
+                          value={formNuevaTabla.nombre}
+                          onChange={(e) => setFormNuevaTabla({...formNuevaTabla, nombre: e.target.value})}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-400 outline-none font-semibold text-gray-700 transition-all"
+                          placeholder="Ej. Academia de Matemáticas"
+                        />
+                      </div>
+
+                      {/* Color de la Tabla */}
+                      <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">Color de Identificación</label>
+                        <div className="flex flex-wrap gap-3 p-3 bg-gray-50 rounded-xl border border-gray-200">
+                          {coloresTablas.map(color => (
+                            <button
+                              key={color}
+                              type="button"
+                              onClick={() => setFormNuevaTabla({...formNuevaTabla, color: color})}
+                              className={`w-8 h-8 rounded-full ${color} transition-all shadow-sm ${formNuevaTabla.color === color ? 'ring-4 ring-offset-2 ring-indigo-400 scale-110' : 'hover:scale-110 border border-gray-300'}`}
+                              title="Seleccionar color"
+                            />
+                          ))}
+                        </div>
+                        <p className="text-xs text-gray-500 mt-1 font-medium">Este color se usará en el encabezado y en las tarjetas de eventos.</p>
+                      </div>
+
+                      <div className="relative flex py-2 items-center">
+                        <div className="flex-grow border-t border-gray-200"></div>
+                        <span className="flex-shrink-0 mx-4 text-gray-400 text-xs font-bold uppercase tracking-wider">Cargar Datos</span>
+                        <div className="flex-grow border-t border-gray-200"></div>
+                      </div>
+
+                      {/* Subir Archivo Excel/CSV */}
+                      <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-2">Opción A: Subir Excel / CSV</label>
+                        <label className="flex flex-col items-center justify-center w-full h-28 border-2 border-dashed border-gray-300 rounded-xl cursor-pointer bg-gray-50 hover:bg-indigo-50 hover:border-indigo-300 transition-colors">
+                          <div className="flex flex-col items-center justify-center pt-5 pb-6">
+                            <span className="text-3xl mb-2">📁</span>
+                            <p className="mb-1 text-sm text-gray-500 font-semibold">Haz clic para subir tu archivo</p>
+                            <p className="text-xs text-gray-400">Formatos soportados: .xlsx, .csv</p>
+                          </div>
+                          <input 
+                            type="file" 
+                            className="hidden" 
+                            accept=".xlsx, .csv" 
+                            onChange={(e) => setFormNuevaTabla({...formNuevaTabla, archivo: e.target.files[0]})}
+                          />
+                        </label>
+                        {formNuevaTabla.archivo && (
+                          <div className="mt-2 text-sm text-indigo-600 font-bold flex items-center gap-2 bg-indigo-50 p-2 rounded-lg border border-indigo-100">
+                            ✅ Archivo seleccionado: {formNuevaTabla.archivo.name}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Columnas Manuales */}
+                      <div>
+                        <label className="block text-sm font-bold text-gray-700 mb-1">Opción B: Crear Columnas Manualmente</label>
+                        <p className="text-xs text-gray-500 mb-2 font-medium">Si no tienes archivo, escribe los nombres de las columnas separados por comas.</p>
+                        <textarea
+                          value={formNuevaTabla.columnasManuales}
+                          onChange={(e) => setFormNuevaTabla({...formNuevaTabla, columnasManuales: e.target.value})}
+                          rows="2"
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-400 outline-none text-sm transition-all"
+                          placeholder="Ej. No. Empleado, Nombre Completo, Departamento"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex gap-3 pt-5 mt-2 border-t border-gray-100">
+                      <button
+                        onClick={() => setMostrarModalCrearTabla(false)}
+                        className="flex-1 bg-gray-200 text-gray-700 py-3 rounded-xl font-bold hover:bg-gray-300 transition-colors"
+                      >
+                        Cancelar
+                      </button>
+                      <button
+                        onClick={guardarNuevaTabla}
+                        disabled={cargando}
+                        className={`flex-1 text-white py-3 rounded-xl font-bold transition-all shadow-md hover:shadow-lg ${formNuevaTabla.color} hover:brightness-90 flex items-center justify-center`}
+                      >
+                        {cargando ? "Guardando..." : "Guardar Tabla"}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* === MODAL DE ÉXITO INTERACTIVO === */}
+              {modalExitoTabla.visible && (
+                <div className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in duration-200">
+                  <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-7 text-center transform transition-all">
+                    <div className="mx-auto flex items-center justify-center h-16 w-16 rounded-full bg-green-100 mb-4 shadow-inner">
+                      <span className="text-3xl">🎉</span>
+                    </div>
+                    <h3 className="text-2xl font-extrabold text-gray-800 mb-2">¡Tabla Creada!</h3>
+                    <p className="text-sm text-gray-600 mb-6 font-medium">
+                      La tabla <strong>{modalExitoTabla.nombre}</strong> se guardó exitosamente. Puedes editarla ahora mismo para asignar los IDs faltantes, o dejarlo para después.
+                    </p>
+                    <div className="flex flex-col gap-3">
+                      <button
+                        onClick={() => abrirEdicionTablaPersonalizada(modalExitoTabla.tablaId, modalExitoTabla.nombre, modalExitoTabla.maestros)}
+                        className="w-full bg-fime-main text-white py-3 rounded-xl font-bold hover:bg-fime-dark transition-all shadow-md"
+                      >
+                        ✏️ Editar Tabla Ahora
+                      </button>
+                      <button
+                        onClick={() => setModalExitoTabla({ visible: false, tablaId: null, nombre: "", maestros: [] })}
+                        className="w-full bg-gray-100 text-gray-700 py-3 rounded-xl font-bold hover:bg-gray-200 transition-all"
+                      >
+                        Lo haré después
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* === MODO EDICIÓN: TABLA PERSONALIZADA (IDs) === */}
+              {tablaPersonalizadaEnEdicion && (
+                <div className="fixed inset-0 bg-white z-[60] flex flex-col animate-in slide-in-from-bottom-4 duration-300">
+                  <div className="bg-white border-b border-gray-200 p-4 md:p-6 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4 shrink-0">
+                    <div>
+                      <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+                        <span className="bg-indigo-100 text-indigo-700 px-3 py-1 rounded-lg text-sm">Editando Tabla</span>
+                        {tablaPersonalizadaEnEdicion.nombre}
+                      </h2>
+                      <p className="text-xs text-gray-500 mt-1 font-medium">Aquí asignas los No. de Empleado (IDs) para que los maestros puedan iniciar sesión.</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2 w-full md:w-auto">
+                      <button onClick={generarIdsAleatorios6Digitos} className="flex-1 md:flex-none bg-amber-400 text-amber-900 px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-amber-500 transition-colors flex items-center justify-center gap-2">
+                        ⚡ Crear IDs Aleatorios
+                      </button>
+                      <button onClick={() => setTablaPersonalizadaEnEdicion(null)} className="flex-1 md:flex-none bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-300 transition-colors">
+                        Cancelar
+                      </button>
+                      <button onClick={guardarCambiosTablaPersonalizada} disabled={cargando} className="flex-1 md:flex-none bg-green-600 text-white px-6 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-green-700 transition-colors flex items-center justify-center gap-2">
+                        {cargando ? "Guardando..." : "💾 Guardar y Sincronizar"}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 overflow-auto bg-gray-50 p-4 md:p-6">
+                    <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                      <div className="p-4 border-b border-gray-100 bg-sky-50/40 flex justify-between items-center">
+                        <button
+                          type="button"
+                          onClick={() => setFilasTablaPersonalizada([{ id: "", nombreCompleto: "" }, ...filasTablaPersonalizada])}
+                          className="text-sky-700 font-bold text-sm bg-sky-100 hover:bg-sky-200 px-4 py-2 rounded-lg transition-colors shadow-sm flex items-center gap-2"
+                        >
+                          ➕ Agregar Fila Manual
+                        </button>
+                        <span className="text-xs font-bold text-gray-500">Total: {filasTablaPersonalizada.length} registros</span>
+                      </div>
+                      <table className="w-full text-left border-collapse">
+                        <thead>
+                          <tr className="bg-sky-50 border-b border-gray-200">
+                            <th className="p-4 text-sm font-bold text-sky-800 w-1/3">No. Empleado / ID Usuario</th>
+                            <th className="p-4 text-sm font-bold text-gray-600">Nombre del Docente</th>
+                            <th className="p-4 text-sm font-bold text-red-500 text-center w-20">Quitar</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {filasTablaPersonalizada.map((m, idx) => (
+                            <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                              <td className="p-3">
+                                <input
+                                  type="text"
+                                  value={m.id || ""}
+                                  onChange={(e) => {
+                                    const nuevasFilas = [...filasTablaPersonalizada];
+                                    nuevasFilas[idx].id = e.target.value;
+                                    setFilasTablaPersonalizada(nuevasFilas);
+                                  }}
+                                  className={`w-full p-2 border rounded-lg outline-none focus:ring-2 focus:ring-indigo-400 font-semibold text-sm transition-all ${!m.id ? "bg-red-50 border-red-300 text-red-700 placeholder-red-300" : "border-gray-300 text-gray-700"}`}
+                                  placeholder="Escribe un ID (6 dígitos)..."
+                                />
+                              </td>
+                              <td className="p-3 text-sm text-gray-800 font-medium">
+                                <input
+                                  type="text"
+                                  value={m.nombreCompleto || ""}
+                                  onChange={(e) => {
+                                    const nuevasFilas = [...filasTablaPersonalizada];
+                                    nuevasFilas[idx].nombreCompleto = e.target.value;
+                                    setFilasTablaPersonalizada(nuevasFilas);
+                                  }}
+                                  placeholder="Nombre completo del docente..."
+                                  className="w-full p-2 border border-gray-200 focus:border-indigo-400 rounded-lg outline-none text-sm transition-colors"
+                                />
+                              </td>
+                              <td className="p-3 text-center">
+                                <button
+                                  type="button"
+                                  onClick={() => setFilasTablaPersonalizada(filasTablaPersonalizada.filter((_, i) => i !== idx))}
+                                  className="text-red-500 hover:text-red-700 p-2 bg-red-50 rounded-lg"
+                                  title="Quitar de esta tabla"
+                                >
+                                  🗑️
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
