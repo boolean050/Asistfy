@@ -260,7 +260,8 @@ function App() {
     nombre: "",
     color: "bg-cyan-500", // Color vibrante por defecto
     columnasManuales: "",
-    archivo: null
+    archivo: null, // Volvemos a un solo archivo
+    fechaSubida: "" // Guardamos la fecha/hora de carga
   });
 
   // ESTADOS PARA ÉXITO Y EDICIÓN DE TABLA PERSONALIZADA
@@ -1462,7 +1463,7 @@ function App() {
   };
 
 
-  // === FASE 3: LÓGICA INTELIGENTE DE TABLAS Y SINCRONIZACIÓN ===
+  // === FASE 3: LÓGICA HÍBRIDA DE TABLAS (LIBERTAD TOTAL + UN SOLO ARCHIVO) ===
   const guardarNuevaTabla = async () => {
     if (!formNuevaTabla.nombre.trim()) {
       alert("⚠️ Por favor, asigna un nombre a la tabla.");
@@ -1474,9 +1475,9 @@ function App() {
       let maestrosExtraidos = [];
       let columnasExtraidas = ["ID USUARIO", "NOMBRE DEL DOCENTE"];
 
-      // PROCESAR EXCEL SI HAY UNO
+      // PROCESAR UN SOLO ARCHIVO EXCEL SI HAY UNO
       if (formNuevaTabla.archivo) {
-        const procesarExcel = () => new Promise((resolve, reject) => {
+        await new Promise((resolve, reject) => {
           const reader = new FileReader();
           reader.onload = (evt) => {
             try {
@@ -1485,39 +1486,53 @@ function App() {
               const wsname = wb.SheetNames[0];
               const filas = XLSX.utils.sheet_to_json(wb.Sheets[wsname], { header: 1 });
               
-              const normalizar = (texto) => String(texto).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
-              let idxFilaTitulos = -1, idxColEmp = -1, idxColNom = -1;
-
+              let idxFilaTitulos = -1;
+              let maxCols = 0;
+              
               for (let i = 0; i < Math.min(10, filas.length); i++) {
-                const fila = filas[i];
-                if (!fila || fila.length === 0) continue;
-                idxColEmp = fila.findIndex(c => c && (normalizar(c).includes("empleado") || normalizar(c).includes("matricula") || normalizar(c).includes("id usuario") || normalizar(c) === "id"));
-                idxColNom = fila.findIndex(c => c && (normalizar(c).includes("nombre") || normalizar(c).includes("docente") || normalizar(c).includes("maestro")));
-                
-                if (idxColNom !== -1) {
+                if (!filas[i]) continue;
+                const celdasValidas = filas[i].filter(c => c && String(c).trim() !== "").length;
+                if (celdasValidas > maxCols) {
+                  maxCols = celdasValidas;
                   idxFilaTitulos = i;
-                  break;
                 }
               }
+              
+              if (idxFilaTitulos === -1 && filas.length > 0) idxFilaTitulos = 0;
 
               if (idxFilaTitulos !== -1) {
-                // Si no detectó columna de ID por nombre, revisamos si alguna columna tiene números de 4 a 8 dígitos
+                let columnasExcel = filas[idxFilaTitulos].map(c => String(c || `Columna ${Math.random().toString().slice(2,5)}`).trim());
+                
+                let idxColEmp = -1;
+                const normalizar = (texto) => String(texto).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+                
+                idxColEmp = columnasExcel.findIndex(c => {
+                  const norm = normalizar(c);
+                  return norm.includes("empleado") || norm.includes("matricula") || norm.includes("id");
+                });
+
                 if (idxColEmp === -1) {
                   const filaMuestra = filas.slice(idxFilaTitulos + 1).find(f => f && f.length > 0);
                   if (filaMuestra) {
-                    idxColEmp = filaMuestra.findIndex((celda, idx) => idx !== idxColNom && celda !== undefined && /^\d{4,8}$/.test(String(celda).trim()));
+                    idxColEmp = filaMuestra.findIndex(celda => celda !== undefined && /^\d{4,8}$/.test(String(celda).trim()));
                   }
                 }
 
-                let columnasExcel = filas[idxFilaTitulos].map(c => String(c || "").trim()).filter(Boolean);
+                let idxColNom = columnasExcel.findIndex(c => {
+                  const norm = normalizar(c);
+                  return norm.includes("nombre") || norm.includes("docente") || norm.includes("maestro");
+                });
+
+                if (idxColNom === -1) idxColNom = idxColEmp === 0 && columnasExcel.length > 1 ? 1 : 0;
+
                 columnasExtraidas = idxColEmp === -1 ? ["ID USUARIO", ...columnasExcel] : columnasExcel;
 
                 for (let i = idxFilaTitulos + 1; i < filas.length; i++) {
                   if (!filas[i]) continue;
                   const rawEmp = idxColEmp !== -1 ? String(filas[i][idxColEmp] ?? "").trim() : "";
-                  // Validamos que el ID tenga entre 4 y 8 caracteres; si no, queda vacío para asignarle uno
-                  const idValido = rawEmp.length >= 4 && rawEmp.length <= 8 ? rawEmp : "";
+                  const idValido = rawEmp.length >= 4 && rawEmp.length <= 8 ? rawEmp : ""; 
                   const nom = filas[i][idxColNom];
+                  
                   if (nom && String(nom).trim() !== "") {
                     maestrosExtraidos.push({
                       id: idValido,
@@ -1527,7 +1542,7 @@ function App() {
                 }
                 resolve();
               } else {
-                reject("No se encontró una columna de 'Nombre' en el Excel.");
+                resolve(); 
               }
             } catch (e) {
               reject(e);
@@ -1535,10 +1550,9 @@ function App() {
           };
           reader.readAsBinaryString(formNuevaTabla.archivo);
         });
-        await procesarExcel();
       }
 
-      // Si el usuario escribió columnas manuales, las respetamos asegurando el ID al principio
+      // Si el usuario escribió columnas manuales, las respetamos
       if (formNuevaTabla.columnasManuales.trim()) {
         const manuales = formNuevaTabla.columnasManuales.split(",").map(c => c.trim()).filter(Boolean);
         const tieneId = manuales.some(c => {
@@ -1577,16 +1591,16 @@ function App() {
       }
 
       setMostrarModalCrearTabla(false);
-      setFormNuevaTabla({ nombre: "", color: "bg-cyan-500", columnasManuales: "", archivo: null });
+      setFormNuevaTabla({ nombre: "", color: "bg-cyan-500", columnasManuales: "", archivo: null, fechaSubida: "" });
       setModalExitoTabla({ visible: true, tablaId: docRef.id, nombre: formNuevaTabla.nombre.trim(), maestros: maestrosExtraidos });
 
     } catch (err) {
       console.error(err);
-      alert(typeof err === "string" ? "⚠️ " + err : "❌ Error al crear la tabla. Verifica tus permisos en Firebase.");
+      alert(typeof err === "string" ? "⚠️ " + err : "❌ Error al procesar el archivo. Revisa el formato.");
     }
     setCargando(false);
   };
-
+  
   const abrirEdicionTablaPersonalizada = (tablaId, nombre, maestros) => {
     setTablaPersonalizadaEnEdicion({ id: tablaId, nombre: nombre });
     setFilasTablaPersonalizada(JSON.parse(JSON.stringify(maestros || [])));
@@ -1681,7 +1695,6 @@ function App() {
     setCargando(true);
     try {
       const numEmpleadosNuevos = [];
-      // Usamos 240 porque hacemos 2 escrituras por maestro (directorio_fime + pre_asistencias = 480 operaciones por lote)
       const CHUNK_SIZE = 240;
       for (let i = 0; i < tabla.maestros.length; i += CHUNK_SIZE) {
         const chunk = tabla.maestros.slice(i, i + CHUNK_SIZE);
@@ -1690,11 +1703,9 @@ function App() {
           const idLimpio = String(maestro.id).trim();
           const nombreLimpio = (maestro.nombreCompleto || "Sin Nombre").trim();
 
-          // Aseguramos que exista en el directorio general
           const dirRef = db.collection("directorio_fime").doc(idLimpio);
           batch.set(dirRef, { nombreCompleto: nombreLimpio, registrado: true }, { merge: true });
 
-          // Lo registramos en el evento
           const docIdUnico = `${eventoSeleccionado.id}_${idLimpio}`;
           const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
           batch.set(preAsisRef, {
@@ -1730,7 +1741,6 @@ function App() {
       }
     }
   };
-
   
   const eliminarEvento = async () => {
     if (!editandoEventoId) return;
@@ -3358,7 +3368,7 @@ function App() {
                   </div>
                 )}
               </div>
-
+                
               {/* === CARRUSEL DE TABLAS PERSONALIZADAS === */}
               {listaDeTablasPersonalizadas.length > 0 && (
                 <div className="mb-6 bg-white p-4 rounded-xl shadow-sm border border-gray-200">
@@ -3379,6 +3389,7 @@ function App() {
                   </div>
                 </div>
               )}
+
 
               {/* NUEVO: BARRA DE BÚSQUEDA GENERAL */}
               <input
@@ -3605,37 +3616,84 @@ function App() {
 
                       {/* Subir Archivo Excel/CSV */}
                       <div>
-                        <label className="block text-sm font-bold text-gray-700 mb-2">Opción A: Subir Excel / CSV</label>
-                        <label className="flex flex-col items-center justify-center w-full h-28 border-2 border-dashed border-gray-300 rounded-xl cursor-pointer bg-gray-50 hover:bg-indigo-50 hover:border-indigo-300 transition-colors">
-                          <div className="flex flex-col items-center justify-center pt-5 pb-6">
-                            <span className="text-3xl mb-2">📁</span>
-                            <p className="mb-1 text-sm text-gray-500 font-semibold">Haz clic para subir tu archivo</p>
-                            <p className="text-xs text-gray-400">Formatos soportados: .xlsx, .csv</p>
+                        <div className="mb-3">
+                          <label className="block text-sm font-bold text-gray-700">Opción A: Subir Excel / CSV</label>
+                          <p className="text-[11.5px] text-gray-500 font-medium leading-tight mt-1 bg-gray-50 p-2 rounded-lg border border-gray-200">
+                            <strong className="text-gray-700">Estructura esperada:</strong> Matrícula, Nombre, Departamento (o como las tengas). 
+                            <br/>Si el sistema no detecta una columna con IDs (4 a 8 dígitos), creará una automáticamente.
+                          </p>
+                        </div>
+                        
+                        <label 
+                          className="flex flex-col items-center justify-center w-full h-28 border-2 border-dashed border-gray-300 rounded-xl cursor-pointer bg-gray-50 hover:bg-indigo-50 hover:border-indigo-400 transition-colors group relative"
+                          onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('bg-indigo-50', 'border-indigo-400'); }}
+                          onDragLeave={(e) => { e.preventDefault(); e.currentTarget.classList.remove('bg-indigo-50', 'border-indigo-400'); }}
+                          onDrop={(e) => {
+                            e.preventDefault();
+                            e.currentTarget.classList.remove('bg-indigo-50', 'border-indigo-400');
+                            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                              const f = e.dataTransfer.files[0];
+                              const ahora = new Date();
+                              const fFormat = `${String(ahora.getDate()).padStart(2, '0')}/${String(ahora.getMonth() + 1).padStart(2, '0')}/${ahora.getFullYear().toString().slice(-2)} - ${String(ahora.getHours()).padStart(2, '0')}:${String(ahora.getMinutes()).padStart(2, '0')} hrs`;
+                              setFormNuevaTabla({...formNuevaTabla, archivo: f, fechaSubida: fFormat});
+                            }
+                          }}
+                        >
+                          <div className="flex flex-col items-center justify-center pt-5 pb-6 text-center px-4 pointer-events-none">
+                            <span className="text-3xl mb-2 group-hover:scale-110 transition-transform">📁</span>
+                            <p className="mb-1 text-sm text-gray-600 font-bold">Haz clic o arrastra para subir tu archivo</p>
+                            <p className="text-xs text-gray-400 font-medium">Soporta un archivo .xlsx o .csv</p>
                           </div>
                           <input 
                             type="file" 
                             className="hidden" 
                             accept=".xlsx, .csv" 
-                            onChange={(e) => setFormNuevaTabla({...formNuevaTabla, archivo: e.target.files[0]})}
+                            onChange={(e) => {
+                              if (e.target.files.length > 0) {
+                                const f = e.target.files[0];
+                                const ahora = new Date();
+                                const fFormat = `${String(ahora.getDate()).padStart(2, '0')}/${String(ahora.getMonth() + 1).padStart(2, '0')}/${ahora.getFullYear().toString().slice(-2)} - ${String(ahora.getHours()).padStart(2, '0')}:${String(ahora.getMinutes()).padStart(2, '0')} hrs`;
+                                setFormNuevaTabla({...formNuevaTabla, archivo: f, fechaSubida: fFormat});
+                              }
+                              e.target.value = null; 
+                            }}
                           />
                         </label>
+
+                        {/* ARCHIVO SELECCIONADO (CON BOTÓN BORRAR Y FECHA) */}
                         {formNuevaTabla.archivo && (
-                          <div className="mt-2 text-sm text-indigo-600 font-bold flex items-center gap-2 bg-indigo-50 p-2 rounded-lg border border-indigo-100">
-                            ✅ Archivo seleccionado: {formNuevaTabla.archivo.name}
+                          <div className="mt-3 text-sm text-indigo-700 flex flex-col bg-indigo-50 p-3 rounded-xl border border-indigo-200 shadow-sm animate-in slide-in-from-bottom-2">
+                            <div className="flex justify-between items-start mb-1">
+                              <span className="font-bold flex items-center gap-2 truncate pr-2">
+                                <span>✅</span> {formNuevaTabla.archivo.name}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => { e.preventDefault(); setFormNuevaTabla({...formNuevaTabla, archivo: null, fechaSubida: ""}); }}
+                                className="text-red-500 hover:text-red-700 bg-white hover:bg-red-50 p-1.5 rounded-lg transition-colors shadow-sm shrink-0 border border-red-100"
+                                title="Eliminar archivo"
+                              >
+                                🗑️
+                              </button>
+                            </div>
+                            <span className="text-[11px] text-indigo-500 font-semibold uppercase tracking-wider pl-6">
+                              Subido el {formNuevaTabla.fechaSubida}
+                            </span>
                           </div>
                         )}
                       </div>
 
                       {/* Columnas Manuales */}
-                      <div>
+                      <div className={`transition-opacity duration-300 ${formNuevaTabla.archivo ? "opacity-50 cursor-not-allowed" : "opacity-100"}`}>
                         <label className="block text-sm font-bold text-gray-700 mb-1">Opción B: Crear Columnas Manualmente</label>
                         <p className="text-xs text-gray-500 mb-2 font-medium">Si no tienes archivo, escribe los nombres de las columnas separados por comas.</p>
                         <textarea
                           value={formNuevaTabla.columnasManuales}
                           onChange={(e) => setFormNuevaTabla({...formNuevaTabla, columnasManuales: e.target.value})}
                           rows="2"
-                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-400 outline-none text-sm transition-all"
-                          placeholder="Ej. No. Empleado, Nombre Completo, Departamento"
+                          disabled={!!formNuevaTabla.archivo}
+                          className="w-full px-4 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-400 outline-none text-sm transition-all disabled:bg-gray-100 disabled:text-gray-400"
+                          placeholder={formNuevaTabla.archivo ? "Bloqueado porque ya subiste un archivo." : "Ej. No. Empleado, Nombre Completo, Departamento"}
                         />
                       </div>
                     </div>
