@@ -7,18 +7,31 @@ const CORREO_ADMIN = "coordinacion.fimeed05@gmail.com";
 const BannerAsistenciaDinamico = ({ evento, numEmpleado }) => {
   const [asistioHoy, setAsistioHoy] = useState(false);
   const [horaRegistro, setHoraRegistro] = useState("");
-  // NUEVO: Estado para ocultar el parpadeo mientras lee Firebase
   const [cargandoBanner, setCargandoBanner] = useState(true);
+
+  const hoyISO = new Date().toLocaleDateString("en-CA");
+  const eventoAunNoInicia = Boolean(evento?.fecha && hoyISO < evento.fecha);
 
   useEffect(() => {
     if (!evento || !numEmpleado) return;
+
+    if (eventoAunNoInicia) {
+      setAsistioHoy(false);
+      setHoraRegistro("");
+      setCargandoBanner(false);
+      return;
+    }
+
+    setCargandoBanner(true);
+    setAsistioHoy(false);
+    setHoraRegistro("");
 
     const calcularDiasEvento = (fechaInicio, fechaFin, esMultiDia) => {
       if (!esMultiDia || !fechaFin || !fechaInicio) return 1;
       const inicio = new Date(`${fechaInicio}T00:00:00`);
       const fin = new Date(`${fechaFin}T00:00:00`);
       const diferenciaMs = fin - inicio;
-      const dias = Math.ceil(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
+      const dias = Math.round(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
 
       // BLINDAJE ANTI-NaN: Si el cálculo da error, devolvemos 1 día por defecto
       return dias > 0 && !isNaN(dias) ? dias : 1;
@@ -29,42 +42,51 @@ const BannerAsistenciaDinamico = ({ evento, numEmpleado }) => {
     const unsubscribe = db
       .collection("asistencias")
       .doc(docIdUnico)
-      .onSnapshot((docSnap) => {
-        if (docSnap.exists) {
-          const data = docSnap.data();
-          const fechaHoyLocal = new Date().toLocaleDateString("en-CA");
-          const diaDeHoyNumero = Number(
-            calcularDiasEvento(evento.fecha, fechaHoyLocal, evento.esMultiDia),
-          );
+      .onSnapshot(
+        (docSnap) => {
+          if (docSnap.exists) {
+            const data = docSnap.data();
+            const fechaHoyLocal = new Date().toLocaleDateString("en-CA");
+            const diaDeHoyNumero = Number(
+              calcularDiasEvento(evento.fecha, fechaHoyLocal, evento.esMultiDia),
+            );
 
-          const diasAsistidos = data.diasAsistidos
-            ? data.diasAsistidos.map(Number)
-            : [];
+            const diasAsistidos = data.diasAsistidos
+              ? data.diasAsistidos.map(Number)
+              : [];
 
-          if (diasAsistidos.includes(diaDeHoyNumero)) {
-            setAsistioHoy(true);
-            const timestampFirma = data.ultimaFirma || data.fechaFirma;
-            if (timestampFirma) {
-              setHoraRegistro(
-                new Date(timestampFirma.toDate()).toLocaleTimeString("es-MX", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                }),
-              );
+            if (diasAsistidos.includes(diaDeHoyNumero)) {
+              setAsistioHoy(true);
+              const timestampFirma = data.ultimaFirma || data.fechaFirma;
+              if (timestampFirma && timestampFirma.toDate) {
+                setHoraRegistro(
+                  new Date(timestampFirma.toDate()).toLocaleTimeString("es-MX", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  }),
+                );
+              } else {
+                setHoraRegistro("");
+              }
+            } else {
+              setAsistioHoy(false);
+              setHoraRegistro("");
             }
           } else {
             setAsistioHoy(false);
+            setHoraRegistro("");
           }
-        } else {
-          setAsistioHoy(false);
-        }
 
-        // Apagamos la animación de carga en cuanto Firebase responde
-        setCargandoBanner(false);
-      });
+          setCargandoBanner(false);
+        },
+        (err) => {
+          console.error("Error al verificar asistencia del día:", err);
+          setCargandoBanner(false);
+        },
+      );
 
     return () => unsubscribe();
-  }, [evento, numEmpleado]);
+  }, [evento, numEmpleado, eventoAunNoInicia]);
 
   const fechaVisual = new Date().toLocaleDateString("es-MX", {
     day: "2-digit",
@@ -72,7 +94,22 @@ const BannerAsistenciaDinamico = ({ evento, numEmpleado }) => {
     year: "numeric",
   });
 
-  // 1. ESTADO DE CARGA (Evita el parpadeo)
+  // 1. ESTADO AZUL (El evento aún no inicia — se evalúa antes que todo)
+  if (eventoAunNoInicia) {
+    const [anio, mes, dia] = evento.fecha.split("-");
+    return (
+      <div className="w-full bg-sky-50 p-4 rounded-xl border border-sky-200 text-center flex flex-col justify-center shadow-inner transition-all duration-300">
+        <span className="font-semibold text-sky-800 text-sm mb-1">
+          Este evento aún no inicia.
+        </span>
+        <span className="font-black tracking-wide text-sky-700 drop-shadow-sm text-[0.90rem] sm:text-base">
+          INICIA EL {dia}/{mes}/{anio}
+        </span>
+      </div>
+    );
+  }
+
+  // 2. ESTADO DE CARGA (Evita el parpadeo)
   if (cargandoBanner) {
     return (
       <div className="w-full bg-gray-50 p-4 rounded-xl border border-gray-200 text-center flex flex-col justify-center shadow-inner transition-all duration-300 animate-pulse">
@@ -86,7 +123,7 @@ const BannerAsistenciaDinamico = ({ evento, numEmpleado }) => {
     );
   }
 
-  // 2. ESTADO VERDE (Ya asistió)
+  // 3. ESTADO VERDE (Ya asistió)
   if (asistioHoy) {
     return (
       <div className="w-full bg-green-50 p-4 rounded-xl border border-green-200 text-center flex flex-col justify-center shadow-inner transition-all duration-300">
@@ -101,23 +138,7 @@ const BannerAsistenciaDinamico = ({ evento, numEmpleado }) => {
     );
   }
 
-    // 2b. ESTADO AZUL (El evento aún no inicia)
-  const hoyISO = new Date().toLocaleDateString("en-CA");
-  if (evento.fecha && hoyISO < evento.fecha) {
-    const [anio, mes, dia] = evento.fecha.split("-");
-    return (
-      <div className="w-full bg-sky-50 p-4 rounded-xl border border-sky-200 text-center flex flex-col justify-center shadow-inner transition-all duration-300">
-        <span className="font-semibold text-sky-800 text-sm mb-1">
-          Este evento aún no inicia.
-        </span>
-        <span className="font-black tracking-wide text-sky-700 drop-shadow-sm text-[0.90rem] sm:text-base">
-          INICIA EL {dia}/{mes}/{anio}
-        </span>
-      </div>
-    );
-  }
-
-  // 3. ESTADO NARANJA (Falta asistir)
+  // 4. ESTADO NARANJA (Falta asistir)
   return (
     <div className="w-full bg-gradient-to-r from-amber-50 to-orange-50 p-4 rounded-xl border border-amber-200 text-center flex flex-col justify-center shadow-inner transition-all duration-300">
       <span className="font-semibold text-gray-700 text-sm mb-1">
@@ -198,7 +219,7 @@ function App() {
 
   // ESTADOS DE ASISTENCIAS
   const [preRegistradosEvento, setPreRegistradosEvento] = useState([]);
-  const [asistentesFinalesEvento, setAsistentesFinalesEvento] = useState([]);
+  const [asistentesFinalesEvento, setAsistentesFinalesEvento] = useState({});
   const [yaRegistrado, setYaRegistrado] = useState(false);
   const [misInvitaciones, setMisInvitaciones] = useState([]); // Para visualizacion de tarjetas de evento de usuarios permitidos
 
@@ -277,7 +298,7 @@ function App() {
     const inicio = new Date(`${fechaInicio}T00:00:00`);
     const fin = new Date(`${fechaFin}T00:00:00`);
     const diferenciaMs = fin - inicio;
-    const dias = Math.ceil(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
+    const dias = Math.round(diferenciaMs / (1000 * 60 * 60 * 24)) + 1;
 
     // BLINDAJE ANTI-NaN: Si el cálculo da error, devolvemos 1 día por defecto
     return dias > 0 && !isNaN(dias) ? dias : 1;
@@ -521,7 +542,7 @@ function App() {
       unsubInternos();
       unsubTablas();
     };
-  }, [necesitaEventos]);
+  }, [necesitaEventos, esAdmin]);
 
   // Directorio: solo se descarga cuando una pantalla lo necesita
   useEffect(() => {
@@ -580,6 +601,10 @@ function App() {
       pantallaActual === "admin_asistencia_evento" &&
       eventoSeleccionado
     ) {
+      // Limpiar datos del evento anterior mientras llega el snapshot actual
+      setPreRegistradosEvento([]);
+      setAsistentesFinalesEvento({});
+
       // ESCUCHADOR 1: Va a Firebase y trae a los invitados (Pre-asistencias)
       unsubscribePre = db
         .collection("pre_asistencias")
@@ -672,36 +697,29 @@ function App() {
   }, []);
 
 
-  // === NUEVO: EFECTO DE INACTIVIDAD (3 MINUTOS) ===
+  // === EFECTO DE INACTIVIDAD (60 MIN ADMIN / 3 MIN DOCENTE) ===
   useEffect(() => {
+    if (!numEmpleado || pantallaActual === "validacion") return;
+
     let timeoutId;
+    const tiempoLimiteMs = (esAdmin ? 60 : 3) * 60 * 1000;
 
     const resetTimer = () => {
       clearTimeout(timeoutId);
-      timeoutId = setTimeout(
-        () => {
-          // En lugar de leer el estado, leemos directamente si la sesión sigue viva en memoria
-          const adminToken = sessionStorage.getItem("esAdminFime");
-          const userToken = sessionStorage.getItem("numEmpleadoFime");
-
-          if (adminToken || userToken) {
-            sessionStorage.clear();
-            window.location.reload();
-          }
-          // CORRECCIÓN VITAL: 60 minutos si eres admin (para no interrumpir eventos), 3 minutos si eres usuario normal
-        },
-        (sessionStorage.getItem("esAdminFime") === "true" ? 60 : 3) * 60 * 1000,
-      );
+      timeoutId = setTimeout(() => {
+        auth.signOut().finally(() => {
+          sessionStorage.clear();
+          window.location.reload();
+        });
+      }, tiempoLimiteMs);
     };
 
-    const eventosUsuario = [
-      "keydown",
-      "click",
-    ];
-    // Dejamos SOLO el click. Un tap en el celular cuenta como click, así el navegador puede usar el 100% de la memoria en deslizar la pantalla suavemente.
-    eventosUsuario.forEach((evt) => window.addEventListener(evt, resetTimer, { passive: true }));
+    const eventosUsuario = ["keydown", "click"];
+    eventosUsuario.forEach((evt) =>
+      window.addEventListener(evt, resetTimer, { passive: true }),
+    );
 
-    resetTimer(); // Iniciar primer conteo
+    resetTimer();
 
     return () => {
       clearTimeout(timeoutId);
@@ -709,7 +727,7 @@ function App() {
         window.removeEventListener(evt, resetTimer),
       );
     };
-  }, []); // <-- ARRAY VACÍO: Adiós fugas de memoria. Solo se ejecuta una vez.
+  }, [esAdmin, numEmpleado, pantallaActual]);
 
   // === NUEVO: EFECTO DE AUTODESTRUCCIÓN DE EVENTOS (+15 DÍAS) ===
   useEffect(() => {
@@ -845,28 +863,36 @@ function App() {
             if (eventoDoc.exists) esInterno = true;
           }
 
-          if (!eventoDoc.exists) {
-            setError("❌ El evento que escaneaste ya no existe.");
+          const reportarErrorQR = (mensaje) => {
+            if (pantallaActual !== "validacion") {
+              alert(mensaje);
+              setQrEventoId(null);
+              window.history.replaceState({}, document.title, window.location.pathname);
+            } else {
+              setError(mensaje);
+            }
             setCargando(false);
+          };
+
+          if (!eventoDoc.exists) {
+            reportarErrorQR("❌ El evento que escaneaste ya no existe.");
             return;
           }
 
           // BLINDAJE ANTI-TRAMPAS: Bloquear si el evento ya caducó
           const eventoData = { id: eventoDoc.id, ...eventoDoc.data() };
           if (esEventoCaducado(eventoData)) {
-            setError(
+            reportarErrorQR(
               "⏳ Este evento ya ha finalizado. No se aceptan más registros de asistencia.",
             );
-            setCargando(false);
             return;
           }
 
           // BLINDAJE ANTI-VIAJEROS: Bloquear si el evento aún no inicia
           if (esEventoFuturo(eventoData.fecha)) {
-            setError(
+            reportarErrorQR(
               "⏳ Este evento aún no comienza. Podrás registrar tu asistencia el día del evento.",
             );
-            setCargando(false);
             return;
           }
 
@@ -879,10 +905,9 @@ function App() {
               .get();
 
             if (!preSnap.exists) {
-              setError(
+              reportarErrorQR(
                 "⚠️ Acceso denegado: No estás en la lista exclusiva de invitados para esta reunión.",
               );
-              setCargando(false);
               return;
             }
           }
@@ -932,9 +957,20 @@ function App() {
     setModoEdicion(false);
     setMostrarPopup(false);
     setConfirmacionExitosa(false);
+    setMostrarMenuColor(false);
+    setMenuDescargaAbierto(false);
+    setMenuDescargaGeneralAbierto(false);
+    setMenuAccionesMovil(false);
+    setTablaPersonalizadaEnEdicion(null);
     // Vaciamos arreglos de Firebase para no contaminar al siguiente usuario
     setColorTema("bg-fime-main");
     setMisInvitaciones([]);
+    setListaDirectorio([]);
+    setListaEventos([]);
+    setListaEventosInternos([]);
+    setListaDeTablasPersonalizadas([]);
+    setPreRegistradosEvento([]);
+    setAsistentesFinalesEvento({});
     setEventoSeleccionado(null);
     
     // --- CORRECCIÓN: Liberar memoria y limpiar URL para no atrapar al usuario ---
@@ -949,6 +985,10 @@ function App() {
     setEditandoEventoId(null);
     setMostrarPopup(false);
     setResaltarFechas(false);
+    setMostrarMenuColor(false);
+    setMenuDescargaAbierto(false);
+    setMenuDescargaGeneralAbierto(false);
+    setMenuAccionesMovil(false);
     setBusquedaMaestros(""); // Limpia el buscador de directorio al cambiar de módulo
     setBusquedaAsistencias(""); // Limpia el buscador de asistencias
   };
@@ -1220,10 +1260,33 @@ function App() {
   };
 
   const guardarCambios = async () => {
+    const maestrosValidos = cambiosDirectorio
+      .filter((emp) => emp.id && String(emp.id).trim() !== "")
+      .map((emp) => ({
+        ...emp,
+        id: String(emp.id).trim(),
+        nombreCompleto: String(emp.nombreCompleto || "").trim(),
+        trayectoria: String(emp.trayectoria || "").trim(),
+      }));
+
+    // Validar caracteres inválidos para Firestore ('/', '.', '..') e IDs duplicados
+    const idsVistos = new Set();
+    for (const emp of maestrosValidos) {
+      if (emp.id.includes("/") || emp.id === "." || emp.id === "..") {
+        alert(`⚠️ El número de empleado "${emp.id}" contiene caracteres no permitidos (no uses "/").`);
+        return;
+      }
+      if (idsVistos.has(emp.id)) {
+        alert(`⚠️ El número de empleado "${emp.id}" está duplicado. Corrige los repetidos antes de guardar.`);
+        return;
+      }
+      idsVistos.add(emp.id);
+    }
+
     setCargando(true);
     try {
       const eliminados = listaDirectorio.filter(
-        (orig) => !cambiosDirectorio.some((c) => c.id === orig.id),
+        (orig) => !maestrosValidos.some((c) => c.id === String(orig.id).trim()),
       );
 
       // NUEVO: Promesas para borrar el rastro de los eliminados en todos lados sin saturar el Batch
@@ -1268,29 +1331,24 @@ function App() {
         promesasLimpieza.push(p1, p2);
       });
 
-      // CORRECCIÓN VITAL: Ahorro extremo de recursos en Firebase (Solo actualiza lo que cambió)
-      const maestrosValidos = cambiosDirectorio.filter(
-        (emp) => emp.id && emp.id.trim() !== "",
-      );
-
       const maestrosAActualizar = maestrosValidos.filter((empMod) => {
-        const original = listaDirectorio.find((orig) => orig.id === empMod.id);
+        const original = listaDirectorio.find(
+          (orig) => String(orig.id).trim() === empMod.id,
+        );
         if (!original) return true; // Es un maestro nuevo
-        // Retorna true solo si realmente le modificaste el nombre o la trayectoria
         return (
           original.nombreCompleto !== empMod.nombreCompleto ||
-          original.trayectoria !== empMod.trayectoria
+          (original.trayectoria || "") !== empMod.trayectoria
         );
       });
 
       const CHUNK_SIZE = 490;
-      // Ahora solo recorre e impacta a los maestros que sufrieron un cambio
       for (let i = 0; i < maestrosAActualizar.length; i += CHUNK_SIZE) {
         const chunk = maestrosAActualizar.slice(i, i + CHUNK_SIZE);
         const batchGuardado = db.batch();
 
         chunk.forEach((emp) => {
-          const docRef = db.collection("directorio_fime").doc(emp.id.trim());
+          const docRef = db.collection("directorio_fime").doc(emp.id);
           batchGuardado.set(
             docRef,
             {
@@ -1304,11 +1362,11 @@ function App() {
         await batchGuardado.commit();
       }
 
-      await Promise.all(promesasLimpieza); // Esperamos a que borre toda la basura
+      await Promise.all(promesasLimpieza);
 
-      setListaDirectorio(cambiosDirectorio);
+      setListaDirectorio(maestrosValidos);
       setModoEdicion(false);
-      setBusquedaMaestros(""); // Limpia el buscador al guardar con éxito
+      setBusquedaMaestros("");
       alert("✅ Cambios guardados y base de datos limpia con éxito.");
       obtenerMaestros();
     } catch (err) {
@@ -1479,10 +1537,11 @@ function App() {
       if (formNuevaTabla.archivo) {
         await new Promise((resolve, reject) => {
           const reader = new FileReader();
+          reader.onerror = () => reject("No se pudo leer el archivo seleccionado.");
           reader.onload = (evt) => {
             try {
-              const bstr = evt.target.result;
-              const wb = XLSX.read(bstr, { type: "binary" });
+              const data = new Uint8Array(evt.target.result);
+              const wb = XLSX.read(data, { type: "array" });
               const wsname = wb.SheetNames[0];
               const filas = XLSX.utils.sheet_to_json(wb.Sheets[wsname], { header: 1 });
               
@@ -1548,12 +1607,12 @@ function App() {
               reject(e);
             }
           };
-          reader.readAsBinaryString(formNuevaTabla.archivo);
+          reader.readAsArrayBuffer(formNuevaTabla.archivo);
         });
       }
 
-      // Si el usuario escribió columnas manuales, las respetamos
-      if (formNuevaTabla.columnasManuales.trim()) {
+      // Si no hay archivo y el usuario escribió columnas manuales, las respetamos
+      if (!formNuevaTabla.archivo && formNuevaTabla.columnasManuales.trim()) {
         const manuales = formNuevaTabla.columnasManuales.split(",").map(c => c.trim()).filter(Boolean);
         const tieneId = manuales.some(c => {
           const norm = c.toLowerCase();
@@ -1633,13 +1692,35 @@ function App() {
   const guardarCambiosTablaPersonalizada = async () => {
     setCargando(true);
     try {
-      const filasLimpias = filasTablaPersonalizada.filter(m => (m.id && String(m.id).trim() !== "") || (m.nombreCompleto && String(m.nombreCompleto).trim() !== ""));
-      const hayVacios = filasLimpias.some(m => !m.id || String(m.id).trim() === "" || !m.nombreCompleto || String(m.nombreCompleto).trim() === "");
+      const filasLimpias = filasTablaPersonalizada
+        .filter(m => (m.id && String(m.id).trim() !== "") || (m.nombreCompleto && String(m.nombreCompleto).trim() !== ""))
+        .map(m => ({
+          ...m,
+          id: String(m.id || "").trim(),
+          nombreCompleto: String(m.nombreCompleto || "").trim(),
+        }));
+      const hayVacios = filasLimpias.some(m => !m.id || !m.nombreCompleto);
       
       if (hayVacios) {
         alert("⚠️ Todavía hay filas sin ID o sin Nombre. Usa el botón '⚡ Crear IDs Aleatorios' o complétalos manualmente antes de guardar.");
         setCargando(false);
         return;
+      }
+
+      // Validar caracteres inválidos para Firestore ('/', '.', '..') e IDs duplicados
+      const idsVistos = new Set();
+      for (const emp of filasLimpias) {
+        if (emp.id.includes("/") || emp.id === "." || emp.id === "..") {
+          alert(`⚠️ El ID "${emp.id}" contiene caracteres no permitidos (no uses "/").`);
+          setCargando(false);
+          return;
+        }
+        if (idsVistos.has(emp.id)) {
+          alert(`⚠️ El ID "${emp.id}" está duplicado en esta tabla. Corrige los repetidos antes de guardar.`);
+          setCargando(false);
+          return;
+        }
+        idsVistos.add(emp.id);
       }
 
       // 1. Guardar en la colección de tablas
@@ -2048,30 +2129,34 @@ function App() {
 
       // Usamos directorioActual que ya está blindado
       const maestrosAExportar = directorioActual.filter((m) =>
-        evento.tipo === "interno" ? preIds.includes(m.id) : true,
+        evento.tipo === "interno" ? preIds.includes(String(m.id).trim()) : true,
       );
 
       const datosExportar = maestrosAExportar.map((m) => {
+        const idLimpio = String(m.id || "").trim();
         const fila = {
-          "NO. EMPLEADO": m.id,
-          "NOMBRE DEL DOCENTE": m.nombreCompleto,
+          "NO. EMPLEADO": idLimpio,
+          "NOMBRE DEL DOCENTE": m.nombreCompleto || "",
         };
         if (evento.tipo !== "interno")
-          fila["PRE-ASISTENCIA"] = preIds.includes(m.id) ? "SI" : "NO";
+          fila["PRE-ASISTENCIA"] = preIds.includes(idLimpio) ? "SI" : "NO";
         for (let i = 1; i <= numDias; i++) {
           const nombreColumna = obtenerFechaFormateada(
             evento.fecha,
             i - 1,
           ).toUpperCase();
-          fila[nombreColumna] = asisDict[m.id]?.includes(i) ? "SI" : "NO";
+          fila[nombreColumna] = asisDict[idLimpio]?.includes(i) ? "SI" : "NO";
         }
         return fila;
       });
 
+      const nombreSeguro = String(evento.titulo || "Evento")
+        .replace(/[\\/:*?"<>|]/g, "_")
+        .trim();
       const worksheet = XLSX.utils.json_to_sheet(datosExportar);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, "Historial");
-      XLSX.writeFile(workbook, `Historial_${evento.titulo}.xlsx`);
+      XLSX.writeFile(workbook, `Historial_${nombreSeguro}.xlsx`);
     } catch (err) {
       console.error(err);
       alert("❌ Error al descargar el archivo histórico.");
@@ -2090,26 +2175,25 @@ function App() {
 
     const maestrosAExportar = maestrosFiltradosAsistencia.filter((maestro) =>
       eventoSeleccionado.tipo === "interno"
-        ? preRegistradosEvento.includes(maestro.id)
+        ? preRegistradosEvento.includes(String(maestro.id).trim())
         : true,
     );
 
     const datosExportar = maestrosAExportar.map((m) => {
+      const idLimpio = String(m.id || "").trim();
       const fila = {
-        "NO. EMPLEADO": m.id,
-        "NOMBRE DEL DOCENTE": m.nombreCompleto,
+        "NO. EMPLEADO": idLimpio,
+        "NOMBRE DEL DOCENTE": m.nombreCompleto || "",
       };
 
       if (eventoSeleccionado.tipo !== "interno") {
-        fila["PRE-ASISTENCIA"] = preRegistradosEvento.includes(m.id)
+        fila["PRE-ASISTENCIA"] = preRegistradosEvento.includes(idLimpio)
           ? "SI"
           : "NO";
       }
 
-      // Agregamos una columna por cada día del evento
-      // Agregamos una columna por cada día del evento con la fecha exacta
       for (let i = 1; i <= numDias; i++) {
-        const asistio = asistentesFinalesEvento[m.id]?.includes(i);
+        const asistio = asistentesFinalesEvento[idLimpio]?.includes(i);
         const nombreColumna = obtenerFechaFormateada(
           eventoSeleccionado.fecha,
           i - 1,
@@ -2120,11 +2204,15 @@ function App() {
       return fila;
     });
 
+    const nombreSeguro = String(eventoSeleccionado.titulo || "Evento")
+      .replace(/[\\/:*?"<>|]/g, "_")
+      .trim();
+
     if (formato === "xlsx") {
       const worksheet = XLSX.utils.json_to_sheet(datosExportar);
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, "Asistencias");
-      XLSX.writeFile(workbook, `Asistencias_${eventoSeleccionado.titulo}.xlsx`);
+      XLSX.writeFile(workbook, `Asistencias_${nombreSeguro}.xlsx`);
     } else if (formato === "pdf") {
       const doc = new window.jspdf.jsPDF();
       doc.text(`Reporte de Asistencias: ${eventoSeleccionado.titulo}`, 14, 15);
@@ -2158,7 +2246,7 @@ function App() {
         body: cuerpoPDF,
         startY: 25,
       });
-      doc.save(`Asistencias_${eventoSeleccionado.titulo}.pdf`);
+      doc.save(`Asistencias_${nombreSeguro}.pdf`);
     }
 
     // Cierra el menú automáticamente al terminar
@@ -2168,20 +2256,26 @@ function App() {
   const procesarArchivoLista = (e) => {
     const file = e.target.files[0];
     if (!file) return;
-    if (file.name.endsWith(".pdf")) {
+    if (!/\.(xlsx|xls|csv)$/i.test(file.name)) {
       alert(
-        "⚠️ Sube un archivo Excel (.xlsx) para garantizar que los números se vinculen correctamente.",
+        "⚠️ Formato no válido. Sube un archivo Excel (.xlsx, .xls) o CSV (.csv).",
       );
+      e.target.value = null;
       return;
     }
 
     setCargando(true);
     const reader = new FileReader();
+    reader.onerror = () => {
+      alert("❌ No se pudo leer el archivo seleccionado.");
+      setCargando(false);
+      e.target.value = null;
+    };
 
     reader.onload = async (evt) => {
       try {
-        const bstr = evt.target.result;
-        const wb = XLSX.read(bstr, { type: "binary" });
+        const data = new Uint8Array(evt.target.result);
+        const wb = XLSX.read(data, { type: "array" });
         const wsname = wb.SheetNames[0];
 
         const filas = XLSX.utils.sheet_to_json(wb.Sheets[wsname], {
@@ -2305,7 +2399,7 @@ function App() {
         e.target.value = null;
       }
     };
-    reader.readAsBinaryString(file);
+    reader.readAsArrayBuffer(file);
   };
 
   const eliminarExcelCargado = async () => {
@@ -2349,16 +2443,22 @@ function App() {
   // ==========================================
   const maestrosFiltradosGeneral = listaDirectorio.filter(
     (m) =>
-      m.nombreCompleto.toLowerCase().includes(busquedaMaestros.toLowerCase()) ||
-      m.id.toLowerCase().includes(busquedaMaestros.toLowerCase()),
+      String(m.nombreCompleto || "")
+        .toLowerCase()
+        .includes(busquedaMaestros.toLowerCase()) ||
+      String(m.id || "")
+        .toLowerCase()
+        .includes(busquedaMaestros.toLowerCase()),
   );
 
   const maestrosFiltradosAsistencia = listaDirectorio.filter(
     (m) =>
-      m.nombreCompleto
+      String(m.nombreCompleto || "")
         .toLowerCase()
         .includes(busquedaAsistencias.toLowerCase()) ||
-      m.id.toLowerCase().includes(busquedaAsistencias.toLowerCase()),
+      String(m.id || "")
+        .toLowerCase()
+        .includes(busquedaAsistencias.toLowerCase()),
   );
 
   // ==============================================================
@@ -2853,10 +2953,10 @@ function App() {
                   {(pantallaActual === "admin_eventos"
                     ? listaEventos
                     : listaEventosInternos
-                  ).length === 0 && (
+                  ).filter((evento) => !esEventoCaducado(evento)).length === 0 && (
                       <div className="col-span-full bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center text-gray-500">
                         <p className="font-medium text-lg">
-                          No hay eventos registrados en esta sección.
+                          No hay eventos activos en esta sección.
                         </p>
                       </div>
                     )}
@@ -3575,7 +3675,15 @@ function App() {
                         <div className="w-10 h-10 bg-indigo-100 rounded-full flex items-center justify-center text-xl">✨</div>
                         <h3 className="text-xl font-extrabold text-gray-800">Crear Nueva Tabla</h3>
                       </div>
-                      <button onClick={() => setMostrarModalCrearTabla(false)} className="text-gray-400 hover:text-gray-600 text-2xl font-bold">&times;</button>
+                      <button
+                        onClick={() => {
+                          setMostrarModalCrearTabla(false);
+                          setFormNuevaTabla({ nombre: "", color: "bg-cyan-500", columnasManuales: "", archivo: null, fechaSubida: "" });
+                        }}
+                        className="text-gray-400 hover:text-gray-600 text-2xl font-bold"
+                      >
+                        &times;
+                      </button>
                     </div>
 
                     <div className="overflow-y-auto flex-1 pr-2 space-y-5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-gray-100 [&::-webkit-scrollbar-thumb]:bg-gray-300 [&::-webkit-scrollbar-thumb]:rounded-full">
@@ -3633,27 +3741,36 @@ function App() {
                             e.currentTarget.classList.remove('bg-indigo-50', 'border-indigo-400');
                             if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
                               const f = e.dataTransfer.files[0];
+                              if (!/\.(xlsx|xls|csv)$/i.test(f.name)) {
+                                alert("⚠️ Solo se permiten archivos Excel (.xlsx, .xls) o CSV (.csv).");
+                                return;
+                              }
                               const ahora = new Date();
                               const fFormat = `${String(ahora.getDate()).padStart(2, '0')}/${String(ahora.getMonth() + 1).padStart(2, '0')}/${ahora.getFullYear().toString().slice(-2)} - ${String(ahora.getHours()).padStart(2, '0')}:${String(ahora.getMinutes()).padStart(2, '0')} hrs`;
-                              setFormNuevaTabla({...formNuevaTabla, archivo: f, fechaSubida: fFormat});
+                              setFormNuevaTabla({...formNuevaTabla, archivo: f, fechaSubida: fFormat, columnasManuales: ""});
                             }
                           }}
                         >
                           <div className="flex flex-col items-center justify-center pt-5 pb-6 text-center px-4 pointer-events-none">
                             <span className="text-3xl mb-2 group-hover:scale-110 transition-transform">📁</span>
                             <p className="mb-1 text-sm text-gray-600 font-bold">Haz clic o arrastra para subir tu archivo</p>
-                            <p className="text-xs text-gray-400 font-medium">Soporta un archivo .xlsx o .csv</p>
+                            <p className="text-xs text-gray-400 font-medium">Soporta un archivo .xlsx, .xls o .csv</p>
                           </div>
                           <input 
                             type="file" 
                             className="hidden" 
-                            accept=".xlsx, .csv" 
+                            accept=".xlsx, .xls, .csv" 
                             onChange={(e) => {
                               if (e.target.files.length > 0) {
                                 const f = e.target.files[0];
+                                if (!/\.(xlsx|xls|csv)$/i.test(f.name)) {
+                                  alert("⚠️ Solo se permiten archivos Excel (.xlsx, .xls) o CSV (.csv).");
+                                  e.target.value = null;
+                                  return;
+                                }
                                 const ahora = new Date();
                                 const fFormat = `${String(ahora.getDate()).padStart(2, '0')}/${String(ahora.getMonth() + 1).padStart(2, '0')}/${ahora.getFullYear().toString().slice(-2)} - ${String(ahora.getHours()).padStart(2, '0')}:${String(ahora.getMinutes()).padStart(2, '0')} hrs`;
-                                setFormNuevaTabla({...formNuevaTabla, archivo: f, fechaSubida: fFormat});
+                                setFormNuevaTabla({...formNuevaTabla, archivo: f, fechaSubida: fFormat, columnasManuales: ""});
                               }
                               e.target.value = null; 
                             }}
@@ -3700,7 +3817,10 @@ function App() {
 
                     <div className="flex gap-3 pt-5 mt-2 border-t border-gray-100">
                       <button
-                        onClick={() => setMostrarModalCrearTabla(false)}
+                        onClick={() => {
+                          setMostrarModalCrearTabla(false);
+                          setFormNuevaTabla({ nombre: "", color: "bg-cyan-500", columnasManuales: "", archivo: null, fechaSubida: "" });
+                        }}
                         className="flex-1 bg-gray-200 text-gray-700 py-3 rounded-xl font-bold hover:bg-gray-300 transition-colors"
                       >
                         Cancelar
@@ -3746,98 +3866,7 @@ function App() {
                 </div>
               )}
 
-              {/* === MODO EDICIÓN: TABLA PERSONALIZADA (IDs) === */}
-              {tablaPersonalizadaEnEdicion && (
-                <div className="fixed inset-0 bg-white z-[60] flex flex-col animate-in slide-in-from-bottom-4 duration-300">
-                  <div className="bg-white border-b border-gray-200 p-4 md:p-6 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4 shrink-0">
-                    <div>
-                      <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                        <span className="bg-indigo-100 text-indigo-700 px-3 py-1 rounded-lg text-sm">Editando Tabla</span>
-                        {tablaPersonalizadaEnEdicion.nombre}
-                      </h2>
-                      <p className="text-xs text-gray-500 mt-1 font-medium">Aquí asignas los No. de Empleado (IDs) para que los maestros puedan iniciar sesión.</p>
-                    </div>
-                    <div className="flex flex-wrap gap-2 w-full md:w-auto">
-                      <button onClick={generarIdsAleatorios6Digitos} className="flex-1 md:flex-none bg-amber-400 text-amber-900 px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-amber-500 transition-colors flex items-center justify-center gap-2">
-                        ⚡ Crear IDs Aleatorios
-                      </button>
-                      <button onClick={() => setTablaPersonalizadaEnEdicion(null)} className="flex-1 md:flex-none bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-300 transition-colors">
-                        Cancelar
-                      </button>
-                      <button onClick={guardarCambiosTablaPersonalizada} disabled={cargando} className="flex-1 md:flex-none bg-green-600 text-white px-6 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-green-700 transition-colors flex items-center justify-center gap-2">
-                        {cargando ? "Guardando..." : "💾 Guardar y Sincronizar"}
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="flex-1 overflow-auto bg-gray-50 p-4 md:p-6">
-                    <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                      <div className="p-4 border-b border-gray-100 bg-sky-50/40 flex justify-between items-center">
-                        <button
-                          type="button"
-                          onClick={() => setFilasTablaPersonalizada([{ id: "", nombreCompleto: "" }, ...filasTablaPersonalizada])}
-                          className="text-sky-700 font-bold text-sm bg-sky-100 hover:bg-sky-200 px-4 py-2 rounded-lg transition-colors shadow-sm flex items-center gap-2"
-                        >
-                          ➕ Agregar Fila Manual
-                        </button>
-                        <span className="text-xs font-bold text-gray-500">Total: {filasTablaPersonalizada.length} registros</span>
-                      </div>
-                      <table className="w-full text-left border-collapse">
-                        <thead>
-                          <tr className="bg-sky-50 border-b border-gray-200">
-                            <th className="p-4 text-sm font-bold text-sky-800 w-1/3">No. Empleado / ID Usuario</th>
-                            <th className="p-4 text-sm font-bold text-gray-600">Nombre del Docente</th>
-                            <th className="p-4 text-sm font-bold text-red-500 text-center w-20">Quitar</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-gray-100">
-                          {filasTablaPersonalizada.map((m, idx) => (
-                            <tr key={idx} className="hover:bg-gray-50 transition-colors">
-                              <td className="p-3">
-                                <input
-                                  type="text"
-                                  value={m.id || ""}
-                                  onChange={(e) => {
-                                    const nuevasFilas = [...filasTablaPersonalizada];
-                                    nuevasFilas[idx].id = e.target.value;
-                                    setFilasTablaPersonalizada(nuevasFilas);
-                                  }}
-                                  className={`w-full p-2 border rounded-lg outline-none focus:ring-2 focus:ring-indigo-400 font-semibold text-sm transition-all ${!m.id ? "bg-red-50 border-red-300 text-red-700 placeholder-red-300" : "border-gray-300 text-gray-700"}`}
-                                  placeholder="Escribe un ID (6 dígitos)..."
-                                />
-                              </td>
-                              <td className="p-3 text-sm text-gray-800 font-medium">
-                                <input
-                                  type="text"
-                                  value={m.nombreCompleto || ""}
-                                  onChange={(e) => {
-                                    const nuevasFilas = [...filasTablaPersonalizada];
-                                    nuevasFilas[idx].nombreCompleto = e.target.value;
-                                    setFilasTablaPersonalizada(nuevasFilas);
-                                  }}
-                                  placeholder="Nombre completo del docente..."
-                                  className="w-full p-2 border border-gray-200 focus:border-indigo-400 rounded-lg outline-none text-sm transition-colors"
-                                />
-                              </td>
-                              <td className="p-3 text-center">
-                                <button
-                                  type="button"
-                                  onClick={() => setFilasTablaPersonalizada(filasTablaPersonalizada.filter((_, i) => i !== idx))}
-                                  className="text-red-500 hover:text-red-700 p-2 bg-red-50 rounded-lg"
-                                  title="Quitar de esta tabla"
-                                >
-                                  🗑️
-                                </button>
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
+              </div>
           )}
 
           {pantallaActual === "registrar_evento" && esAdmin && (
@@ -4449,6 +4478,98 @@ function App() {
           )}
         </div>
       </main>
+
+      {/* === MODO EDICIÓN GLOBAL: TABLA PERSONALIZADA (IDs) === */}
+      {esAdmin && tablaPersonalizadaEnEdicion && (
+        <div className="fixed inset-0 bg-white z-[60] flex flex-col animate-in slide-in-from-bottom-4 duration-300">
+          <div className="bg-white border-b border-gray-200 p-4 md:p-6 shadow-sm flex flex-col md:flex-row justify-between items-center gap-4 shrink-0">
+            <div>
+              <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+                <span className="bg-indigo-100 text-indigo-700 px-3 py-1 rounded-lg text-sm">Editando Tabla</span>
+                {tablaPersonalizadaEnEdicion.nombre}
+              </h2>
+              <p className="text-xs text-gray-500 mt-1 font-medium">Aquí asignas los No. de Empleado (IDs) para que los maestros puedan iniciar sesión.</p>
+            </div>
+            <div className="flex flex-wrap gap-2 w-full md:w-auto">
+              <button onClick={generarIdsAleatorios6Digitos} className="flex-1 md:flex-none bg-amber-400 text-amber-900 px-4 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-amber-500 transition-colors flex items-center justify-center gap-2">
+                ⚡ Crear IDs Aleatorios
+              </button>
+              <button onClick={() => setTablaPersonalizadaEnEdicion(null)} className="flex-1 md:flex-none bg-gray-200 text-gray-700 px-4 py-2 rounded-lg text-sm font-bold hover:bg-gray-300 transition-colors">
+                Cancelar
+              </button>
+              <button onClick={guardarCambiosTablaPersonalizada} disabled={cargando} className="flex-1 md:flex-none bg-green-600 text-white px-6 py-2 rounded-lg text-sm font-bold shadow-sm hover:bg-green-700 transition-colors flex items-center justify-center gap-2">
+                {cargando ? "Guardando..." : "💾 Guardar y Sincronizar"}
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-auto bg-gray-50 p-4 md:p-6">
+            <div className="max-w-4xl mx-auto bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+              <div className="p-4 border-b border-gray-100 bg-sky-50/40 flex justify-between items-center">
+                <button
+                  type="button"
+                  onClick={() => setFilasTablaPersonalizada([{ id: "", nombreCompleto: "" }, ...filasTablaPersonalizada])}
+                  className="text-sky-700 font-bold text-sm bg-sky-100 hover:bg-sky-200 px-4 py-2 rounded-lg transition-colors shadow-sm flex items-center gap-2"
+                >
+                  ➕ Agregar Fila Manual
+                </button>
+                <span className="text-xs font-bold text-gray-500">Total: {filasTablaPersonalizada.length} registros</span>
+              </div>
+              <table className="w-full text-left border-collapse">
+                <thead>
+                  <tr className="bg-sky-50 border-b border-gray-200">
+                    <th className="p-4 text-sm font-bold text-sky-800 w-1/3">No. Empleado / ID Usuario</th>
+                    <th className="p-4 text-sm font-bold text-gray-600">Nombre del Docente</th>
+                    <th className="p-4 text-sm font-bold text-red-500 text-center w-20">Quitar</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {filasTablaPersonalizada.map((m, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50 transition-colors">
+                      <td className="p-3">
+                        <input
+                          type="text"
+                          value={m.id || ""}
+                          onChange={(e) => {
+                            const nuevasFilas = [...filasTablaPersonalizada];
+                            nuevasFilas[idx].id = e.target.value;
+                            setFilasTablaPersonalizada(nuevasFilas);
+                          }}
+                          className={`w-full p-2 border rounded-lg outline-none focus:ring-2 focus:ring-indigo-400 font-semibold text-sm transition-all ${!m.id ? "bg-red-50 border-red-300 text-red-700 placeholder-red-300" : "border-gray-300 text-gray-700"}`}
+                          placeholder="Escribe un ID (6 dígitos)..."
+                        />
+                      </td>
+                      <td className="p-3 text-sm text-gray-800 font-medium">
+                        <input
+                          type="text"
+                          value={m.nombreCompleto || ""}
+                          onChange={(e) => {
+                            const nuevasFilas = [...filasTablaPersonalizada];
+                            nuevasFilas[idx].nombreCompleto = e.target.value;
+                            setFilasTablaPersonalizada(nuevasFilas);
+                          }}
+                          placeholder="Nombre completo del docente..."
+                          className="w-full p-2 border border-gray-200 focus:border-indigo-400 rounded-lg outline-none text-sm transition-colors"
+                        />
+                      </td>
+                      <td className="p-3 text-center">
+                        <button
+                          type="button"
+                          onClick={() => setFilasTablaPersonalizada(filasTablaPersonalizada.filter((_, i) => i !== idx))}
+                          className="text-red-500 hover:text-red-700 p-2 bg-red-50 rounded-lg"
+                          title="Quitar de esta tabla"
+                        >
+                          🗑️
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
