@@ -1875,8 +1875,12 @@ function App() {
 
     setCargando(true);
     try {
+      const esInterno = eventoSeleccionado.tipo === "interno";
       const numEmpleadosNuevos = [];
+      const nuevosColores = { ...(eventoSeleccionado.coloresMaestros || {}) };
+      const colorTabla = tabla.color || "bg-cyan-500";
       const CHUNK_SIZE = 240;
+
       for (let i = 0; i < tabla.maestros.length; i += CHUNK_SIZE) {
         const chunk = tabla.maestros.slice(i, i + CHUNK_SIZE);
         const batch = db.batch();
@@ -1884,23 +1888,45 @@ function App() {
           const idLimpio = String(maestro.id).trim();
           const nombreLimpio = (maestro.nombreCompleto || "Sin Nombre").trim();
 
+          // Sincroniza al directorio general sin duplicar (usa el No. Empleado como ID único)
           const dirRef = db.collection("directorio_fime").doc(idLimpio);
           batch.set(dirRef, { nombreCompleto: nombreLimpio, registrado: true }, { merge: true });
 
-          const docIdUnico = `${eventoSeleccionado.id}_${idLimpio}`;
-          const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
-          batch.set(preAsisRef, {
-            eventoId: eventoSeleccionado.id,
-            numEmpleado: idLimpio,
-            nombreMaestro: nombreLimpio,
-            fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
-          });
-          numEmpleadosNuevos.push(idLimpio);
+          // Guarda el color de la tabla para iluminar el borde de este docente en el evento
+          nuevosColores[idLimpio] = colorTabla;
+
+          // Solo en eventos INTERNOS se agregan a pre_asistencias (lista de invitados).
+          // En eventos PÚBLICOS no se marcan como pre-asistencia para que el docente la confirme por sí mismo.
+          if (esInterno) {
+            const docIdUnico = `${eventoSeleccionado.id}_${idLimpio}`;
+            const preAsisRef = db.collection("pre_asistencias").doc(docIdUnico);
+            batch.set(preAsisRef, {
+              eventoId: eventoSeleccionado.id,
+              numEmpleado: idLimpio,
+              nombreMaestro: nombreLimpio,
+              fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
+            });
+            numEmpleadosNuevos.push(idLimpio);
+          }
         });
         await batch.commit();
       }
 
-      setPreRegistradosEvento((prev) => [...new Set([...(prev || []), ...numEmpleadosNuevos])]);
+      // Guardar el mapa de colores en el documento del evento para mantener el borde iluminado
+      const coleccionEvento = esInterno ? "eventos_internos_fime" : "eventos_fime";
+      await db.collection(coleccionEvento).doc(eventoSeleccionado.id).set(
+        { coloresMaestros: nuevosColores },
+        { merge: true },
+      );
+
+      setEventoSeleccionado((prev) =>
+        prev ? { ...prev, coloresMaestros: nuevosColores } : prev,
+      );
+
+      if (esInterno) {
+        setPreRegistradosEvento((prev) => [...new Set([...(prev || []), ...numEmpleadosNuevos])]);
+      }
+
       await obtenerMaestros();
       alert(`✅ Se importaron ${tabla.maestros.length} maestros de la tabla "${tabla.nombre}".`);
       setMostrarModalImportarTabla(false);
@@ -2089,6 +2115,19 @@ function App() {
     "bg-lime-500": "text-lime-500",
     "bg-amber-500": "text-amber-500",
   };
+  const mapaHexTablas = {
+    "bg-red-500": "#ef4444",
+    "bg-rose-500": "#f43f5e",
+    "bg-fuchsia-500": "#d946ef",
+    "bg-purple-500": "#a855f7",
+    "bg-indigo-500": "#6366f1",
+    "bg-blue-500": "#3b82f6",
+    "bg-cyan-500": "#06b6d4",
+    "bg-emerald-500": "#10b981",
+    "bg-lime-500": "#84cc16",
+    "bg-amber-500": "#f59e0b",
+  };
+
   const themeTextColor = mapaTextoTema[colorTema] || "text-fime-main";
   const themeHover = "hover:brightness-90 transition-all";
   const themeText = "text-fime-main";
@@ -2561,6 +2600,16 @@ function App() {
           await batch.commit();
         }
       }
+
+      const coleccionEvento =
+        eventoSeleccionado.tipo === "interno" ? "eventos_internos_fime" : "eventos_fime";
+      await db.collection(coleccionEvento).doc(eventoSeleccionado.id).set(
+        { coloresMaestros: {} },
+        { merge: true },
+      );
+      setEventoSeleccionado((prev) =>
+        prev ? { ...prev, coloresMaestros: {} } : prev,
+      );
 
       // Vaciamos la memoria visual al instante
       setPreRegistradosEvento([]);
@@ -3320,69 +3369,91 @@ function App() {
                                   )
                                   : true,
                               )
-                              .map((maestro) => (
-                                <tr
-                                  key={maestro.id}
-                                  className="hover:bg-gray-50 transition-colors"
-                                >
-                                  <td className="p-4 text-sm font-semibold text-gray-700">
-                                    {maestro.id}
-                                  </td>
-                                  <td className="p-4 text-sm text-gray-800 font-medium">
-                                    {maestro.nombreCompleto}
-                                  </td>
-                                  {eventoSeleccionado?.tipo !== "interno" && (
-                                    <td className="p-4 text-center text-xl">
-                                      {preRegistradosEvento.includes(
-                                        String(maestro.id).trim(),
-                                      )
-                                        ? "✅"
-                                        : "❗"}
-                                    </td>
-                                  )}
-                                  {[...Array(numDias)].map((_, index) => {
-                                    const diaColumna = index + 1;
-                                    const idLimpio = String(maestro.id).trim();
-                                    const asistioEseDia =
-                                      asistentesFinalesEvento[
-                                        idLimpio
-                                      ]?.includes(diaColumna);
+                              .map((maestro) => {
+                                const idMaestroLimpio = String(maestro.id).trim();
+                                const colorClaseTabla =
+                                  eventoSeleccionado?.coloresMaestros?.[idMaestroLimpio];
+                                const colorHexFila = colorClaseTabla
+                                  ? mapaHexTablas[colorClaseTabla]
+                                  : null;
 
-                                    return (
-                                      <td
-                                        key={index}
-                                        className="p-4 text-center text-xl bg-gray-50/30 border-l border-gray-100"
-                                      >
-                                        <button
-                                          onClick={(e) => {
-                                            e.preventDefault();
-                                            if (
-                                              !esEventoCaducado(
-                                                eventoSeleccionado,
-                                              )
-                                            ) {
-                                              toggleAsistenciaManual(
-                                                maestro,
-                                                diaColumna,
-                                              );
-                                            }
-                                          }}
-                                          className={`w-full h-full py-2 flex items-center justify-center focus:outline-none select-none ${esEventoCaducado(eventoSeleccionado) ? "cursor-default opacity-80" : "hover:scale-125 transition-transform cursor-pointer"}`}
-                                          title={
-                                            esEventoCaducado(eventoSeleccionado)
-                                              ? "Archivo Histórico (Solo lectura)"
-                                              : asistioEseDia
-                                                ? "Quitar asistencia"
-                                                : "Marcar asistencia"
+                                return (
+                                  <tr
+                                    key={maestro.id}
+                                    className="hover:bg-gray-50 transition-colors"
+                                    style={
+                                      colorHexFila
+                                        ? {
+                                            backgroundColor: `${colorHexFila}12`,
+                                            outline: `2px solid ${colorHexFila}`,
+                                            outlineOffset: "-2px",
                                           }
-                                        >
-                                          {asistioEseDia ? "✅" : "❗"}
-                                        </button>
+                                        : undefined
+                                    }
+                                  >
+                                    <td
+                                      className="p-4 text-sm font-semibold text-gray-700"
+                                      style={
+                                        colorHexFila
+                                          ? { borderLeft: `6px solid ${colorHexFila}` }
+                                          : undefined
+                                      }
+                                    >
+                                      {maestro.id}
+                                    </td>
+                                    <td className="p-4 text-sm text-gray-800 font-medium">
+                                      {maestro.nombreCompleto}
+                                    </td>
+                                    {eventoSeleccionado?.tipo !== "interno" && (
+                                      <td className="p-4 text-center text-xl">
+                                        {preRegistradosEvento.includes(idMaestroLimpio)
+                                          ? "✅"
+                                          : "❗"}
                                       </td>
-                                    );
-                                  })}
-                                </tr>
-                              ))}
+                                    )}
+                                    {[...Array(numDias)].map((_, index) => {
+                                      const diaColumna = index + 1;
+                                      const asistioEseDia =
+                                        asistentesFinalesEvento[
+                                          idMaestroLimpio
+                                        ]?.includes(diaColumna);
+
+                                      return (
+                                        <td
+                                          key={index}
+                                          className="p-4 text-center text-xl bg-gray-50/30 border-l border-gray-100"
+                                        >
+                                          <button
+                                            onClick={(e) => {
+                                              e.preventDefault();
+                                              if (
+                                                !esEventoCaducado(
+                                                  eventoSeleccionado,
+                                                )
+                                              ) {
+                                                toggleAsistenciaManual(
+                                                  maestro,
+                                                  diaColumna,
+                                                );
+                                              }
+                                            }}
+                                            className={`w-full h-full py-2 flex items-center justify-center focus:outline-none select-none ${esEventoCaducado(eventoSeleccionado) ? "cursor-default opacity-80" : "hover:scale-125 transition-transform cursor-pointer"}`}
+                                            title={
+                                              esEventoCaducado(eventoSeleccionado)
+                                                ? "Archivo Histórico (Solo lectura)"
+                                                : asistioEseDia
+                                                  ? "Quitar asistencia"
+                                                  : "Marcar asistencia"
+                                            }
+                                          >
+                                            {asistioEseDia ? "✅" : "❗"}
+                                          </button>
+                                        </td>
+                                      );
+                                    })}
+                                  </tr>
+                                );
+                              })}
                           </tbody>
                         </table>
                       </div>
