@@ -415,6 +415,11 @@ function App() {
 
     try {
       const idLimpio = String(formNuevoMaestro.id).trim();
+      if (!idLimpio || idLimpio.includes("/") || idLimpio === "." || idLimpio === "..") {
+        setErrorModalMaestro("⚠️ Ingresa un número de empleado válido (sin '/').");
+        setCargando(false);
+        return;
+      }
       
       // NUEVA VALIDACIÓN: Revisar si ya está registrado en este evento
       if (preRegistradosEvento && preRegistradosEvento.includes(idLimpio)) {
@@ -423,8 +428,21 @@ function App() {
         return;
       }
 
-      // VALIDACIÓN ESTRICTA: Buscamos en el directorio en memoria
-      const maestroEnDirectorio = listaDirectorio.find(
+      // Si el directorio aún no termina de cargarse en memoria, lo consultamos de emergencia
+      let directorioActual = listaDirectorio;
+      if (directorioActual.length === 0) {
+        const dirSnap = await db.collection("directorio_fime").get();
+        directorioActual = dirSnap.docs.map((doc) => ({
+          id: doc.id,
+          nombreCompleto: doc.data().nombreCompleto || "",
+          trayectoria: doc.data().trayectoria || "",
+          registrado: doc.data().registrado || false,
+        }));
+        setListaDirectorio(directorioActual);
+      }
+
+      // VALIDACIÓN ESTRICTA: Buscamos en el directorio
+      const maestroEnDirectorio = directorioActual.find(
         (m) => String(m.id).trim() === idLimpio
       );
 
@@ -569,10 +587,16 @@ function App() {
         // Si el admin borró el evento por completo
         setPantallaActual(esAdmin ? "admin_eventos" : "eventos");
       } else if (
+        eventoSeleccionado.titulo !== eventoActualizado.titulo ||
+        eventoSeleccionado.descripcion !== eventoActualizado.descripcion ||
         eventoSeleccionado.fecha !== eventoActualizado.fecha ||
-        eventoSeleccionado.hora !== eventoActualizado.hora
+        eventoSeleccionado.fechaFin !== eventoActualizado.fechaFin ||
+        eventoSeleccionado.hora !== eventoActualizado.hora ||
+        eventoSeleccionado.horaFin !== eventoActualizado.horaFin ||
+        eventoSeleccionado.esMultiDia !== eventoActualizado.esMultiDia ||
+        eventoSeleccionado.portada !== eventoActualizado.portada
       ) {
-        // Si el admin cambió la fecha u hora, actualizamos la tarjeta en vivo
+        // Si el admin editó cualquier dato del evento, actualizamos la tarjeta en vivo
         setEventoSeleccionado(eventoActualizado);
       }
     }
@@ -586,6 +610,11 @@ function App() {
     let unsubscribeUsuario = null;
 
     // 1. Seguro Anti-F5
+    if (pantallaActual === "confirmar_asistencia" && !qrEventoId) {
+      setPantallaActual(numEmpleado ? (esAdmin ? "admin_eventos" : "eventos") : "validacion");
+      return;
+    }
+
     if (
       (pantallaActual === "admin_asistencia_evento" ||
         pantallaActual === "detalle_evento") &&
@@ -609,30 +638,36 @@ function App() {
       unsubscribePre = db
         .collection("pre_asistencias")
         .where("eventoId", "==", eventoSeleccionado.id)
-        .onSnapshot((snapshot) => {
-          const listaPre = snapshot.docs.map((doc) =>
-            String(doc.data().numEmpleado).trim(),
-          );
-          setPreRegistradosEvento(listaPre);
-        });
+        .onSnapshot(
+          (snapshot) => {
+            const listaPre = snapshot.docs.map((doc) =>
+              String(doc.data().numEmpleado).trim(),
+            );
+            setPreRegistradosEvento(listaPre);
+          },
+          (err) => console.error("Error al escuchar pre-asistencias:", err),
+        );
 
       // ESCUCHADOR 2: Va a Firebase y trae los días asistidos (El diccionario multidía)
       unsubscribeAsis = db
         .collection("asistencias")
         .where("eventoId", "==", eventoSeleccionado.id)
-        .onSnapshot((snapshot) => {
-          const diccionarioAsistencias = {};
-          snapshot.docs.forEach((doc) => {
-            const data = doc.data();
-            if (data.numEmpleado) {
-              // BLINDAJE AL LEER: Quitamos espacios y forzamos números
-              const empId = String(data.numEmpleado).trim();
-              const diasNum = (data.diasAsistidos || [1]).map((d) => Number(d));
-              diccionarioAsistencias[empId] = diasNum;
-            }
-          });
-          setAsistentesFinalesEvento(diccionarioAsistencias);
-        });
+        .onSnapshot(
+          (snapshot) => {
+            const diccionarioAsistencias = {};
+            snapshot.docs.forEach((doc) => {
+              const data = doc.data();
+              if (data.numEmpleado) {
+                // BLINDAJE AL LEER: Quitamos espacios y forzamos números
+                const empId = String(data.numEmpleado).trim();
+                const diasNum = (data.diasAsistidos || [1]).map((d) => Number(d));
+                diccionarioAsistencias[empId] = diasNum;
+              }
+            });
+            setAsistentesFinalesEvento(diccionarioAsistencias);
+          },
+          (err) => console.error("Error al escuchar asistencias:", err),
+        );
     }
 
     /// 3.1 Escuchador Global: Descarga todas las invitaciones de este usuario
@@ -640,22 +675,25 @@ function App() {
         unsubscribeUsuario = db
           .collection("pre_asistencias")
           .where("numEmpleado", "==", String(numEmpleado).trim())
-          .onSnapshot((snapshot) => {
-            // Extraemos solo los IDs de los eventos a los que lo invitaron
-            const invitaciones = snapshot.docs.map((doc) => doc.data().eventoId);
-            
-            setMisInvitaciones(invitaciones);
+          .onSnapshot(
+            (snapshot) => {
+              // Extraemos solo los IDs de los eventos a los que lo invitaron
+              const invitaciones = snapshot.docs.map((doc) => doc.data().eventoId);
+              
+              setMisInvitaciones(invitaciones);
 
-            // NUEVO: Si el maestro está viendo la tarjeta de un evento interno y el admin borra la lista, lo expulsa.
-            if (
-              pantallaActual === "detalle_evento" &&
-              eventoSeleccionado &&
-              eventoSeleccionado.tipo === "interno" &&
-              !invitaciones.includes(eventoSeleccionado.id)
-            ) {
-              setPantallaActual("eventos");
-            }
-          });
+              // NUEVO: Si el maestro está viendo la tarjeta de un evento interno y el admin borra la lista, lo expulsa.
+              if (
+                pantallaActual === "detalle_evento" &&
+                eventoSeleccionado &&
+                eventoSeleccionado.tipo === "interno" &&
+                !invitaciones.includes(eventoSeleccionado.id)
+              ) {
+                setPantallaActual("eventos");
+              }
+            },
+            (err) => console.error("Error al escuchar invitaciones:", err),
+          );
       }
 
     return () => {
@@ -674,14 +712,17 @@ function App() {
     const unsub = db
       .collection("tema")
       .doc("admin")
-      .onSnapshot((snap) => {
-        if (snap.exists && snap.data().color) {
-          setColorAdminGlobal(snap.data().color);
-          // El admin recupera su propio color al entrar
-          if (esAdmin && primeraLectura) setColorTema(snap.data().color);
-        }
-        primeraLectura = false;
-      });
+      .onSnapshot(
+        (snap) => {
+          if (snap.exists && snap.data().color) {
+            setColorAdminGlobal(snap.data().color);
+            // El admin recupera su propio color al entrar
+            if (esAdmin && primeraLectura) setColorTema(snap.data().color);
+          }
+          primeraLectura = false;
+        },
+        (err) => console.error("Error al escuchar tema global:", err),
+      );
     return () => unsub();
   }, [esAdmin, numEmpleado, pantallaActual === "validacion"]);
 
@@ -824,20 +865,28 @@ function App() {
 
   const manejarValidacion = async (e) => {
     e.preventDefault();
+    const inputLimpio = String(numEmpleado || "").trim();
+    if (!inputLimpio) {
+      setError("⚠️ Ingresa una clave de acceso válida.");
+      return;
+    }
+
     setCargando(true);
     setError("");
 
-    const inputLimpio = numEmpleado.trim();
-
     try {
-      
+      // Evita que una contraseña con "/", "." o ".." rompa la consulta a Firestore antes de probar Auth
+      const esIdValidoFirestore =
+        !inputLimpio.includes("/") && inputLimpio !== "." && inputLimpio !== "..";
 
       // REGLA MÁXIMA: Si no existe en la Lista de Maestros General, aquí mismo rebota (Público o Interno).
-      const docRef = db.collection("directorio_fime").doc(inputLimpio);
-      const docSnap = await docRef.get();
+      const docSnap = esIdValidoFirestore
+        ? await db.collection("directorio_fime").doc(inputLimpio).get()
+        : { exists: false };
 
       if (docSnap.exists) {
         const datos = docSnap.data();
+        setNumEmpleado(inputLimpio);
         setNombreMaestro(datos.nombreCompleto);
         setColorTema(
           coloresDocente.includes(datos.colorTema)
@@ -847,22 +896,6 @@ function App() {
         setEsAdmin(false);
 
         if (qrEventoId) {
-          // --- EL CADENERO DEL QR ---
-          let eventoDoc = await db
-            .collection("eventos_fime")
-            .doc(qrEventoId)
-            .get();
-          let esInterno = false;
-
-          // Si no lo encuentra en públicos, busca en internos
-          if (!eventoDoc.exists) {
-            eventoDoc = await db
-              .collection("eventos_internos_fime")
-              .doc(qrEventoId)
-              .get();
-            if (eventoDoc.exists) esInterno = true;
-          }
-
           const reportarErrorQR = (mensaje) => {
             if (pantallaActual !== "validacion") {
               alert(mensaje);
@@ -873,6 +906,28 @@ function App() {
             }
             setCargando(false);
           };
+
+          const qrIdLimpio = String(qrEventoId).trim();
+          if (!qrIdLimpio || qrIdLimpio.includes("/") || qrIdLimpio === "." || qrIdLimpio === "..") {
+            reportarErrorQR("❌ El código QR escaneado no es válido.");
+            return;
+          }
+
+          // --- EL CADENERO DEL QR ---
+          let eventoDoc = await db
+            .collection("eventos_fime")
+            .doc(qrIdLimpio)
+            .get();
+          let esInterno = false;
+
+          // Si no lo encuentra en públicos, busca en internos
+          if (!eventoDoc.exists) {
+            eventoDoc = await db
+              .collection("eventos_internos_fime")
+              .doc(qrIdLimpio)
+              .get();
+            if (eventoDoc.exists) esInterno = true;
+          }
 
           if (!eventoDoc.exists) {
             reportarErrorQR("❌ El evento que escaneaste ya no existe.");
@@ -898,7 +953,7 @@ function App() {
 
           // Si el evento es interno, exige que el usuario esté específicamente en el Excel de invitados
           if (esInterno) {
-            const docIdUnico = `${qrEventoId}_${inputLimpio}`;
+            const docIdUnico = `${qrIdLimpio}_${inputLimpio}`;
             const preSnap = await db
               .collection("pre_asistencias")
               .doc(docIdUnico)
@@ -1014,14 +1069,21 @@ function App() {
   // FLUJO DE CONFIRMACIÓN FINAL (QR SCANEADO)
   // ==========================================
   const registrarAsistenciaFinal = async () => {
+    const qrIdLimpio = String(qrEventoId || "").trim();
+    if (!qrIdLimpio || qrIdLimpio.includes("/") || qrIdLimpio === "." || qrIdLimpio === "..") {
+      alert("❌ Enlace de asistencia inválido. Escanea el código QR nuevamente.");
+      cerrarSesion();
+      return;
+    }
+
     setCargando(true);
     try {
       // 1. Buscamos el evento para saber su fecha de inicio y si es multidia
-      let eventoDoc = await db.collection("eventos_fime").doc(qrEventoId).get();
+      let eventoDoc = await db.collection("eventos_fime").doc(qrIdLimpio).get();
       if (!eventoDoc.exists) {
         eventoDoc = await db
           .collection("eventos_internos_fime")
-          .doc(qrEventoId)
+          .doc(qrIdLimpio)
           .get();
       }
 
@@ -1031,7 +1093,21 @@ function App() {
         return;
       }
 
-      const eventoData = eventoDoc.data();
+      const eventoData = { id: eventoDoc.id, ...eventoDoc.data() };
+
+      // Re-validar horario al momento exacto de confirmar (por si dejó la pantalla abierta)
+      if (esEventoCaducado(eventoData)) {
+        alert("⏳ Este evento ya ha finalizado. No se aceptan más registros de asistencia.");
+        setCargando(false);
+        cerrarSesion();
+        return;
+      }
+      if (esEventoFuturo(eventoData.fecha)) {
+        alert("⏳ Este evento aún no comienza. Podrás registrar tu asistencia el día del evento.");
+        setCargando(false);
+        cerrarSesion();
+        return;
+      }
 
       // 2. Calculamos qué día es HOY (Forzamos a que sea NÚMERO)
       const fechaHoyLocal = new Date().toLocaleDateString("en-CA"); // YYYY-MM-DD
@@ -1045,7 +1121,7 @@ function App() {
 
       // BLINDAJE: Limpiamos espacios basura del número de empleado
       const numLimpio = String(numEmpleado).trim();
-      const docIdUnico = `${qrEventoId}_${numLimpio}`;
+      const docIdUnico = `${qrIdLimpio}_${numLimpio}`;
 
       const docRef = db.collection("asistencias").doc(docIdUnico);
       const docSnap = await docRef.get();
@@ -1095,7 +1171,7 @@ function App() {
       } else {
         // Registro por primera vez
         await docRef.set({
-          eventoId: qrEventoId,
+          eventoId: qrIdLimpio,
           numEmpleado: numLimpio, // ID ultra limpio
           nombreMaestro: nombreMaestro,
           diasAsistidos: [diaEscaneado], // Guardado como número real
@@ -1140,11 +1216,12 @@ function App() {
   };
 
   const registrarPreAsistencia = async () => {
-    if (!eventoSeleccionado) return;
+    const numLimpio = String(numEmpleado || "").trim();
+    if (!eventoSeleccionado || !numLimpio) return;
     setCargando(true);
 
     try {
-      const docIdUnico = `${eventoSeleccionado.id}_${numEmpleado}`;
+      const docIdUnico = `${eventoSeleccionado.id}_${numLimpio}`;
       const docRef = db.collection("pre_asistencias").doc(docIdUnico);
       const docSnap = await docRef.get();
 
@@ -1154,7 +1231,7 @@ function App() {
       } else {
         await docRef.set({
           eventoId: eventoSeleccionado.id,
-          numEmpleado: numEmpleado,
+          numEmpleado: numLimpio,
           nombreMaestro: nombreMaestro,
           fechaRegistro: firebase.firestore.FieldValue.serverTimestamp(),
         });
@@ -1201,8 +1278,18 @@ function App() {
 
   const eliminarFila = async (index) => {
     const maestroAEliminar = cambiosDirectorio[index];
+    const idLimpioFila = String(maestroAEliminar.id || "").trim();
+    const existeEnBD = listaDirectorio.some(
+      (m) => String(m.id).trim() === idLimpioFila,
+    );
 
-    if (!maestroAEliminar.id || maestroAEliminar.id.trim() === "") {
+    if (
+      !idLimpioFila ||
+      idLimpioFila.includes("/") ||
+      idLimpioFila === "." ||
+      idLimpioFila === ".." ||
+      !existeEnBD
+    ) {
       const nuevaLista = [...cambiosDirectorio];
       nuevaLista.splice(index, 1);
       setCambiosDirectorio(nuevaLista);
@@ -1283,11 +1370,20 @@ function App() {
       idsVistos.add(emp.id);
     }
 
+    const eliminados = listaDirectorio.filter(
+      (orig) => !maestrosValidos.some((c) => c.id === String(orig.id).trim()),
+    );
+
+    if (eliminados.length > 0) {
+      const listaIds = eliminados.map((e) => e.id).slice(0, 5).join(", ");
+      const confirmCambioId = window.confirm(
+        `⚠️ Modificaste o quitaste ${eliminados.length} número(s) de empleado (${listaIds}${eliminados.length > 5 ? "..." : ""}).\n\nEsto eliminará permanentemente sus asistencias y pre-registros anteriores asociados a esos IDs. ¿Deseas continuar?`,
+      );
+      if (!confirmCambioId) return;
+    }
+
     setCargando(true);
     try {
-      const eliminados = listaDirectorio.filter(
-        (orig) => !maestrosValidos.some((c) => c.id === String(orig.id).trim()),
-      );
 
       // NUEVO: Promesas para borrar el rastro de los eliminados en todos lados sin saturar el Batch
       const promesasLimpieza = [];
@@ -1589,7 +1685,8 @@ function App() {
                 for (let i = idxFilaTitulos + 1; i < filas.length; i++) {
                   if (!filas[i]) continue;
                   const rawEmp = idxColEmp !== -1 ? String(filas[i][idxColEmp] ?? "").trim() : "";
-                  const idValido = rawEmp.length >= 4 && rawEmp.length <= 8 ? rawEmp : ""; 
+                  const esIdSeguro = rawEmp.length >= 4 && rawEmp.length <= 8 && !rawEmp.includes("/") && rawEmp !== "." && rawEmp !== "..";
+                  const idValido = esIdSeguro ? rawEmp : "";
                   const nom = filas[i][idxColNom];
                   
                   if (nom && String(nom).trim() !== "") {
@@ -1762,9 +1859,12 @@ function App() {
       return;
     }
 
-    const faltanIds = tabla.maestros.some(m => !m.id || String(m.id).trim() === "");
-    if (faltanIds) {
-      alert("⚠️ Algunos maestros en esta tabla aún no tienen ID Usuario asignado. Te abriremos el editor de la tabla para que les generes su ID de 6 dígitos con 1 clic.");
+    const hayIdsInvalidos = tabla.maestros.some((m) => {
+      const id = String(m.id || "").trim();
+      return !id || id.includes("/") || id === "." || id === "..";
+    });
+    if (hayIdsInvalidos) {
+      alert("⚠️ Algunos maestros en esta tabla no tienen un ID Usuario válido (o contienen '/'). Te abriremos el editor para corregirlos o generarlos con 1 clic.");
       setMostrarModalImportarTabla(false);
       abrirEdicionTablaPersonalizada(tabla.id, tabla.nombre, tabla.maestros);
       return;
@@ -2047,11 +2147,29 @@ function App() {
 
     setCargando(true);
     try {
+      let directorioActual = listaDirectorio;
+      if (directorioActual.length === 0) {
+        const dirSnap = await db.collection("directorio_fime").get();
+        directorioActual = dirSnap.docs.map((doc) => ({
+          id: doc.id,
+          nombreCompleto: doc.data().nombreCompleto || "",
+          trayectoria: doc.data().trayectoria || "",
+          registrado: doc.data().registrado || false,
+        }));
+        setListaDirectorio(directorioActual);
+      }
+
+      if (directorioActual.length === 0) {
+        alert("⚠️ El directorio general está vacío. Agrega maestros primero.");
+        setCargando(false);
+        return;
+      }
+
       const numEmpleadosNuevos = [];
       const CHUNK_SIZE = 490; // Salvavidas de Firebase
 
-      for (let i = 0; i < listaDirectorio.length; i += CHUNK_SIZE) {
-        const chunk = listaDirectorio.slice(i, i + CHUNK_SIZE);
+      for (let i = 0; i < directorioActual.length; i += CHUNK_SIZE) {
+        const chunk = directorioActual.slice(i, i + CHUNK_SIZE);
         const batch = db.batch();
 
         chunk.forEach((maestro) => {
@@ -2074,7 +2192,7 @@ function App() {
         ...new Set([...(prev || []), ...numEmpleadosNuevos]),
       ]);
       alert(
-        `✅ Carga masiva exitosa. Se registraron ${listaDirectorio.length} maestros en el evento.`,
+        `✅ Carga masiva exitosa. Se registraron ${directorioActual.length} maestros en el evento.`,
       );
     } catch (error) {
       console.error(error);
@@ -2329,9 +2447,11 @@ function App() {
           return;
         }
 
-        // CORRECCIÓN: Separamos los datos a subir en un arreglo temporal
+        // CORRECCIÓN: Separamos los datos a subir en un arreglo temporal (filtrando IDs inválidos para Firestore)
         const datosExtraidos = [];
+        let omitidosInvalidos = 0;
         for (let i = idxFilaTitulos + 1; i < filas.length; i++) {
+          if (!filas[i]) continue;
           const numEmpRaw = filas[i][idxColEmp];
           const nombreRaw = filas[i][idxColNom];
 
@@ -2340,13 +2460,25 @@ function App() {
             numEmpRaw !== null &&
             String(numEmpRaw).trim() !== ""
           ) {
+            const numEmpStr = String(numEmpRaw).trim();
+            if (numEmpStr.includes("/") || numEmpStr === "." || numEmpStr === "..") {
+              omitidosInvalidos++;
+              continue;
+            }
             datosExtraidos.push({
-              numEmpStr: String(numEmpRaw).trim(),
+              numEmpStr,
               nombreDocente: nombreRaw
                 ? String(nombreRaw).trim()
                 : "SIN NOMBRE",
             });
           }
+        }
+
+        if (datosExtraidos.length === 0) {
+          alert("⚠️ No se encontraron registros con un número de empleado válido en el archivo.");
+          setCargando(false);
+          e.target.value = null;
+          return;
         }
 
         // CORRECCIÓN: Procesamos en Lotes (Batches) de 240 para no romper el límite de Firebase
@@ -2388,7 +2520,9 @@ function App() {
         }
 
         alert(
-          `✅ Carga exitosa. Se detectaron y registraron ${agregados} maestros.`,
+          omitidosInvalidos > 0
+            ? `✅ Carga exitosa. Se registraron ${agregados} maestros (${omitidosInvalidos} filas omitidas por tener ID inválido como "/" o "N/A").`
+            : `✅ Carga exitosa. Se detectaron y registraron ${agregados} maestros.`,
         );
         obtenerMaestros();
       } catch (error) {
@@ -3101,7 +3235,7 @@ function App() {
 
                         <label className="w-full md:w-auto bg-green-100 text-green-700 border border-green-200 hover:bg-green-200 px-4 py-2 rounded-lg text-sm font-bold shadow-sm transition-colors flex items-center justify-center cursor-pointer gap-2 m-0">
                           <span>📁 Subir Excel</span>
-                          <input type="file" accept=".xlsx, .xls" onChange={(e) => { procesarArchivoLista(e); setMenuAccionesMovil(false); }} className="hidden" />
+                          <input type="file" accept=".xlsx, .xls, .csv" onChange={(e) => { procesarArchivoLista(e); setMenuAccionesMovil(false); }} className="hidden" />
                         </label>
 
                         {preRegistradosEvento && preRegistradosEvento.length > 0 && (
